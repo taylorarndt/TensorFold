@@ -46,6 +46,7 @@ pub fn requireMapped(d: limits.MetalLaunch) !void {
 /// Only launches the loader can build on this device enter the limits compiler; declarations are checked first.
 pub fn supported(device: mtl.Device, d: limits.MetalLaunch) bool {
     if (std.mem.startsWith(u8, d.name, "qwen27 prompt ")) return device.tensorUnits() == (std.mem.indexOf(u8, d.name, " m5 ") != null);
+    if (std.mem.startsWith(u8, d.name, "q27 out sums ")) return device.tensorUnits();
     if (std.mem.startsWith(u8, d.name, "lfm2 masked prompt "))
         return @import("metal_support.zig").tensor(tf.lfm2_moe.source.optionalAvailable(device), d.name);
     if (std.mem.startsWith(u8, d.name, "hy4 units "))
@@ -350,6 +351,9 @@ fn resolve(a: std.mem.Allocator, device: mtl.Device, d: limits.MetalLaunch, comp
         // the tree source as kernels.zig compiles it below the M5, where Bolt is refused before load
         if (has(d.name, " mamba ")) head = "#define TF_SIMD_LAYOUT 1\n";
         text = if (has(d.name, " mamba ")) sources.nemotron_tree else try boltSource(d.name);
+    } else if (std.mem.startsWith(u8, d.name, "q27 out sums ")) {
+        if (!assemble) return undefined;
+        text = if (has(d.name, "tf_delta_gdn_post_sums")) sources.core_deltanet else try tf.qwen27.simd_attention.library(a, true, true);
     } else if (std.mem.startsWith(u8, d.name, "qwen27 ")) {
         if (!assemble) return undefined;
         text = if (has(d.name, " copy ")) tf.qwen27.runtime_sources.copy else if (has(d.name, " moe rows ")) tf.qwen27.moe_gpu.rows_source else if (has(d.name, " moe ")) tf.qwen27.runtime_sources.moe else tf.qwen27.runtime_sources.glue;
