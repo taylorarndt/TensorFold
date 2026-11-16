@@ -220,6 +220,8 @@ const valid = [_]Case{
     .{ .name = "TF_DSV41_CALIB_DEEP_REPS", .raw = "1", .n = 1 },
     .{ .name = "TF_DSV41_CALIB_BUDGET_MS", .raw = " 600000 ", .n = 600000 },
     .{ .name = "TF_DSV41_CALIB_BUDGET_MS", .raw = "0", .n = 0 },
+    .{ .name = "TENSORFOLD_CHECKPOINT_SHA256", .raw = "abababababababababababababababababababababababababababababababab", .n = 0 },
+    .{ .name = "TENSORFOLD_PREFILL_SHARE", .raw = "0.5", .n = @bitCast(@as(f64, 0.5)) },
 };
 
 test "environment: valid forms remain raw numbers before existing consumer clamps and defaults" {
