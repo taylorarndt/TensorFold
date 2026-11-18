@@ -89,6 +89,7 @@ pub const LaneHost = struct {
     prefix: @import("lane_host_prefix.zig").Wait = .{}, // a request's wait for a cut another prompt is filling
     finals: std.ArrayList(usize) = .empty,
     pressure: ?@import("memory_pressure.zig").Governor = null, // OS memory pressure (lane_host_pressure.zig); null: off
+    stall: @import("lane_stall.zig").Watch = .{}, // --stall-seconds' sentinel over the work scopes below; off: no thread
     activity: ?@import("lane_activity.zig").Activity = null, // owned work scopes for a backend's watchdog; null: off
     failure: ?@import("lane_activity.zig").Failure = null, // hears a round's or request's error; null: off
     load: load.State = .{}, // this host's part of the server's load ledger (lane_host_load.zig)
@@ -131,6 +132,7 @@ pub const LaneHost = struct {
     /// Stops admitting, cancels what is left and joins the engine thread (after `halt`: the thread is gone already).
     pub fn stop(h: *LaneHost) void {
         rows_host.drainThread(h);
+        h.stall.stop();
         ledger.checkIdle(h); // the engine thread has ended every job
         ledger.uncount(h); // a paged pool outlives the host: its own pages admit it again
         rows_host.close(h);
@@ -177,19 +179,11 @@ pub const LaneHost = struct {
         .imprint = rows_host.ask,
         .drain = rows_host.drain,
         .load = load.attach,
+        .configure_stall = @import("lane_host_stall.zig").configure,
     };
 
-    const scored_vtable: Engine.VTable = blk: {
-        var v = plain_vtable;
-        v.score = scoring.score;
-        break :blk v;
-    };
-
-    const decided_vtable: Engine.VTable = blk: {
-        var v = scored_vtable;
-        v.decide = scoring.decide;
-        break :blk v;
-    };
+    const scored_vtable = @import("lane_host_vtable.zig").scoring(plain_vtable, scoring.score, null);
+    const decided_vtable = @import("lane_host_vtable.zig").scoring(plain_vtable, scoring.score, scoring.decide);
 
     /// The family's queue as a keepalive target, when it set one.
     fn keepaliveFn(ctx: *anyopaque) ?api.keepalive.Target {
@@ -208,6 +202,7 @@ pub const LaneHost = struct {
 
     fn submitFn(ctx: *anyopaque, id: Id, request: *const Request, sink: Sink) api.SubmitError!void {
         const h = self(ctx);
+        if (h.stall.unhealthy.load(.acquire)) return error.Closed;
         if (@import("lane_prompt_only.zig").refuses(h, request)) return error.InvalidRequest;
         const job = h.gpa.create(Job) catch return error.Busy;
         job.* = .{ .host = h, .id = id, .request = request, .sink = sink, .submitted = std.Io.Clock.awake.now(h.io).toNanoseconds() };
@@ -215,7 +210,7 @@ pub const LaneHost = struct {
         if (h.trace) |t| t.line(.{ .t0_ns = job.submitted, .t1_ns = job.submitted, .kind = .submit, .id = id, .rows_to = request.prompt.len });
         h.mutex.lockUncancelable(h.io);
         defer h.unlock();
-        const unavailable = h.closing or (if (h.health) |source| !source.read(source.ctx) else false);
+        const unavailable = h.closing or h.stall.unhealthy.load(.acquire) or (if (h.health) |source| !source.read(source.ctx) else false);
         if (unavailable or h.stale or pressure.refuses(h)) {
             h.gpa.destroy(job);
             return if (unavailable) error.Closed else if (h.stale) error.Stale else error.MemoryPressure;
@@ -521,7 +516,7 @@ pub const LaneHost = struct {
         if (h.rounds) |rd| return rounds.run(h, rd);
         while (true) {
             @import("lane_host_backlog.zig").step(h); // holds precede activity: waits are idle
-            var activity = @import("lane_activity.zig").Activity.enter(h.activity);
+            var activity = @import("lane_activity.zig").Work.enter(h);
             defer activity.end();
             ends.takeCancels(h);
             pressure.step(h);
