@@ -74,6 +74,8 @@ pub const Request = struct {
     unread: ?*const std.atomic.Value(u32) = null,
     /// ``cache_key`` is salted (cache_salt): the lane host neither drafts from nor adds to Recall's shared record.
     salted: bool = false,
+    /// A streamed prompt can report progress before its first token.
+    return_progress: bool = false,
 
     /// The prompt as the prompt cache matches it: an image request's placeholders stand for their images.
     pub fn cacheKey(r: *const Request) []const u32 {
