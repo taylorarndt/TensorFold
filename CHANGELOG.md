@@ -4,6 +4,8 @@ Each release's page on GitHub has its notes and measurements. See [the 1.0.0 rel
 
 ## Unreleased
 
+- Flash Next on CUDA prefill: `TF_FLASHNEXT_PROMPT_ASYNC=1` replaces the full stream sync after each non-final prompt chunk with a fence and double-buffered pinned staging, so the host stages the next chunk while the GPU finishes; the final chunk still synchronizes before logits; off by default (#N).
+
 - Tests: a lane-host case checks that a third short request queued behind two long ones at two slots starts within two rounds of a slot freeing and then gets its fair share of rounds, with full outputs for every request (#N).
 
 - Tests: a reusable lane-core gate checks that a request's tokens, stop reason and RNG positions never depend on which other requests share its batch, when they arrive or when they leave (cohorts of 2, 4 and 8, drafts on and off, greedy and keyed, fresh and restored prefixes) (#N).
