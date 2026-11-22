@@ -46,10 +46,10 @@ pub fn requireMapped(d: limits.MetalLaunch) !void {
 /// Only launches the loader can build on this device enter the limits compiler; declarations are checked first.
 pub fn supported(device: mtl.Device, d: limits.MetalLaunch) bool {
     if (std.mem.startsWith(u8, d.name, "qwen27 prompt ")) {
-        if (std.mem.indexOf(u8, d.name, " tensor ") != null)
-            return @import("metal_support.zig").tensor(device.tensorUnits(), d.name);
-        if (std.mem.indexOf(u8, d.name, " simd ") != null) return true;
-        return device.tensorUnits() == (std.mem.indexOf(u8, d.name, " m5 ") != null);
+        const causal = std.mem.indexOf(u8, d.name, " tensor ") != null or std.mem.indexOf(u8, d.name, " simd ") != null;
+        const units = std.mem.indexOf(u8, d.name, " m5 ") != null or std.mem.indexOf(u8, d.name, " tensor ") != null;
+        if (causal and units) return @import("metal_support.zig").tensor(device.tensorUnits(), d.name);
+        return device.tensorUnits() == units;
     }
     if (std.mem.startsWith(u8, d.name, "lfm2 masked prompt "))
         return @import("metal_support.zig").tensor(tf.lfm2_moe.source.optionalAvailable(device), d.name);
