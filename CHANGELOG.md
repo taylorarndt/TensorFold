@@ -4,6 +4,8 @@ Each release's page on GitHub has its notes and measurements. See [the 1.0.0 rel
 
 ## Unreleased
 
+- Metal Qwen3.8-27B: `TF_Q27_INLINE_SUMS=1` computes lane projections' group sums inside the projection on M5 (no separate sums launch), and `TF_Q27_DRAFT_TWINS=1` gives the DFlash2 drafter the verified scalar and paired matmul twins on M3; same outputs, both off by default (#N).
+
 - GLM TP=2 prefill on CUDA: `TF_GLM_INDEX_SPLIT=32768` keeps indexer scores, pools and token rows local on each rank below that position (no blocking all-gathers) and own partials are read in place; outputs are unchanged and the default stays 2048 (#4510).
 
 - GLM at TP=2 on CUDA prefill: dense attention runs only on the rows sparse attention leaves untouched when a chunk crosses the dense limit, and prefill skips projections nothing reads (MTP proposal and query-side work); outputs are unchanged (#4499).
