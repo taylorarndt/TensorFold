@@ -4,6 +4,8 @@ Each release's page on GitHub has its notes and measurements. See [the 1.0.0 rel
 
 ## Unreleased
 
+- GLM on Metal: `TF_GLM_STARTUP_WARMUP=1` waits for the residency set to settle with one probe and warms the served MTP draft path before the server reports ready, so the first reply doesn't pay those costs; off by default (#N).
+
 - Tests: a reusable lane-core gate checks that a request's tokens, stop reason and RNG positions never depend on which other requests share its batch, when they arrive or when they leave (cohorts of 2, 4 and 8, drafts on and off, greedy and keyed, fresh and restored prefixes) (#N).
 
 - Ripple-65B-Preview on Metal: the native engine serves ricursiveAI's NVFP4 and bf16 releases as published, on M5 or later Macs (M1 to M4 are refused by name), with bf16 caches; `--context` defaults to and stops at 262,144 tokens, and a `thinking_budget` is refused for this model. Every model's `/v1/models` capabilities gain a `reasoning_optional` field, false for all but Ripple (#2231, fixes #2171). Thanks to @BobClawblaw.
