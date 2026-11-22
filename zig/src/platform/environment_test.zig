@@ -220,6 +220,9 @@ const valid = [_]Case{
     .{ .name = "TF_DSV41_CALIB_DEEP_REPS", .raw = "1", .n = 1 },
     .{ .name = "TF_DSV41_CALIB_BUDGET_MS", .raw = " 600000 ", .n = 600000 },
     .{ .name = "TF_DSV41_CALIB_BUDGET_MS", .raw = "0", .n = 0 },
+    .{ .name = "TF_Q35_SKIP_XS", .raw = "1", .n = 1 },
+    .{ .name = "TF_Q35_ACTIVE_TABLES", .raw = "1", .n = 1 },
+    .{ .name = "TF_Q35_CAPTURE", .raw = "1", .n = 1 },
 };
 
 test "environment: valid forms remain raw numbers before existing consumer clamps and defaults" {
