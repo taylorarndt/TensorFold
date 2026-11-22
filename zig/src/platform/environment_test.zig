@@ -128,6 +128,8 @@ const valid = [_]Case{
     .{ .name = "TF_Q27_COPY_ROWS", .raw = "48", .n = 48 },
     .{ .name = "TF_Q27_DRAFT_SLOTS", .raw = "0", .n = 0 },
     .{ .name = "TF_Q27_DRAFT_SLOTS", .raw = "4294967295", .n = std.math.maxInt(u32) },
+    .{ .name = "TF_Q27_MTP_GPU_PICK", .raw = "0", .n = 0 },
+    .{ .name = "TF_Q27_MTP_GPU_PICK", .raw = "1", .n = 1 },
     .{ .name = "TF_HEAD_GEOMETRY", .raw = "0", .n = 0 },
     .{ .name = "TF_PROMPT_ROWS", .raw = "128", .n = 128 },
     .{ .name = "TF_PROMPT_ROWS", .raw = "2048", .n = 2048 },
