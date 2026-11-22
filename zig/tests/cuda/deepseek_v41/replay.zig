@@ -5,6 +5,8 @@ const cuda = @import("cuda");
 const dsv41 = @import("dsv41_kernels");
 const check = @import("../check.zig");
 const Fixture = @import("../fixture.zig").Fixture;
+const identity_dump = @import("identity_dump.zig");
+const adversarial = @import("replay_adversarial.zig");
 
 const replay = dsv41.replay;
 const Gpu = check.Gpu;
@@ -19,6 +21,7 @@ const Ctx = struct {
     a: std.mem.Allocator, // the case's arena: argument trees
     storages: []Storage,
     extra: std.ArrayList(cuda.DeviceBuffer) = .empty,
+    extra_bytes: std.ArrayList(usize) = .empty,
 
     fn ptrOf(c: *Ctx, name: []const u8) !u64 {
         for (c.storages) |s| if (std.mem.eql(u8, s.name, name)) return if (s.buf) |b| b.ptr else 0;
@@ -73,22 +76,88 @@ const Ctx = struct {
         const b = try cuda.DeviceBuffer.alloc(gpu.d, @max(n, 16));
         try b.fill8(0, null);
         try c.extra.append(c.gpa, b);
+        try c.extra_bytes.append(c.gpa, n);
         return b.ptr;
     }
 };
 
-fn upload(gpu: Gpu, fx: Fixture, storages: []Storage) !void {
+fn upload(gpu: Gpu, fx: Fixture, storages: []Storage, plant: ?*const adversarial.Plant) !void {
     var name_buf: [64]u8 = undefined;
     for (storages) |s| {
         if (s.buf) |b| {
             const host = try fx.bytes(try std.fmt.bufPrint(&name_buf, "{s}_before", .{s.name}));
             defer gpu.gpa.free(host);
+            if (plant) |p| try p.apply(s.name, host);
             try b.upload(0, host);
         }
     }
 }
 
-/// Every storage against the recorded after-call bytes, except `skip` (a ticket / counter replaced by a variant).
+const Capture = struct { dir: []const u8, call: Value, variant: []const u8, fill: []const u8, extra_start: usize, split: ?i64 = null };
+
+/// Dump recorded and variant storage; require the normal oracle or a planted finite identity attention difference.
+fn finish(gpu: Gpu, fx: Fixture, c: *const Ctx, storages: []Storage, what: []const u8, skip: ?[]const u8, capture: Capture, planted: bool) !void {
+    if (!identity_dump.active()) return compare(gpu, fx, storages, what, skip);
+    var name_buf: [64]u8 = undefined;
+    var different: ?[]const u8 = null;
+    for (storages) |s| {
+        const got = try gpu.gpa.alloc(u8, s.len);
+        defer gpu.gpa.free(got);
+        if (s.buf) |b| try b.download(0, got);
+        const key = try std.fmt.allocPrint(gpu.gpa, "dsv41/{s}/{s}/{s}/{s}", .{ capture.dir, capture.variant, capture.fill, s.name });
+        defer gpu.gpa.free(key);
+        const kernel = try std.fmt.allocPrint(gpu.gpa, "deepseek replay {s} {s}", .{ what, s.name });
+        defer gpu.gpa.free(kernel);
+        try identity_dump.output(gpu, gpu.gpa, key, .{
+            .kernel = kernel,
+            .served = .{ .fixture = capture.dir, .call = capture.call, .variant = capture.variant },
+            .fill = capture.fill,
+            .storage = s.name,
+            .state = "recorded-storage",
+            .storage_bytes = s.len,
+            .control = if (planted) "replay-adversarial" else null,
+            .split = capture.split,
+        }, got);
+        if (skip) |k| if (std.mem.eql(u8, k, s.name)) continue;
+        const want = try fx.bytes(try std.fmt.bufPrint(&name_buf, "{s}_after", .{s.name}));
+        defer gpu.gpa.free(want);
+        if (want.len != got.len) return error.ReplayStorageLength;
+        if (planted) {
+            if (different == null and !std.mem.eql(u8, got, want)) different = s.name;
+        } else {
+            const label = try std.fmt.allocPrint(gpu.gpa, "{s} storage {s}", .{ what, s.name });
+            defer gpu.gpa.free(label);
+            try check.sameBytes(label, got, want);
+        }
+    }
+    for (c.extra.items[capture.extra_start..], capture.extra_start..) |b, i| {
+        const got = try gpu.gpa.alloc(u8, c.extra_bytes.items[i]);
+        defer gpu.gpa.free(got);
+        try b.download(0, got);
+        const key = try std.fmt.allocPrint(gpu.gpa, "dsv41/{s}/{s}/{s}/extra-{d}", .{ capture.dir, capture.variant, capture.fill, i });
+        defer gpu.gpa.free(key);
+        const kernel = try std.fmt.allocPrint(gpu.gpa, "deepseek replay {s} extra-{d}", .{ what, i });
+        defer gpu.gpa.free(kernel);
+        try identity_dump.output(gpu, gpu.gpa, key, .{
+            .kernel = kernel,
+            .served = .{ .fixture = capture.dir, .call = capture.call, .variant = capture.variant },
+            .fill = capture.fill,
+            .storage = "extra-state",
+            .state = "variant-ticket",
+            .control = if (planted) "replay-adversarial" else null,
+            .storage_bytes = got.len,
+        }, got);
+    }
+    if (planted) {
+        if (different) |name| {
+            std.debug.print("CONTROL dsv41 {s} {s} identity plant: red at {s}\n", .{ capture.dir, what, name });
+        } else {
+            std.debug.print("CONTROL MISSED dsv41 {s} {s} identity plant\n", .{ capture.dir, what });
+            return error.AdversarialControlMissed;
+        }
+    }
+}
+
 fn compare(gpu: Gpu, fx: Fixture, storages: []Storage, what: []const u8, skip: ?[]const u8) !void {
     var name_buf: [64]u8 = undefined;
     for (storages) |s| {
@@ -135,6 +204,7 @@ pub fn run(gpu: Gpu, k: *const dsv41.Kernels, dir: []const u8) !Outcome {
     }
     var c: Ctx = .{ .gpa = gpu.gpa, .a = a, .storages = storages };
     defer {
+        c.extra_bytes.deinit(gpu.gpa);
         for (c.extra.items) |*b| b.free();
         c.extra.deinit(gpu.gpa);
     }
@@ -152,10 +222,10 @@ pub fn run(gpu: Gpu, k: *const dsv41.Kernels, dir: []const u8) !Outcome {
     defer scratch_owned.free();
     var scratch: replay.Scratch = .{ .ptr = scratch_buf.ptr, .len = scratch_buf.len };
 
-    try upload(gpu, fx, storages);
+    try upload(gpu, fx, storages, null);
     if (!try replay.call(k, stream, ext, func, args, kws.items, &scratch)) return .skipped;
     try stream.synchronize();
-    try compare(gpu, fx, storages, func, null);
+    try finish(gpu, fx, &c, storages, func, null, .{ .dir = dir, .call = call, .variant = "recorded", .fill = "recorded", .extra_start = 0 }, false);
 
     var variants: usize = 0;
     // R1 variants of a pre-R1 call (the twin's kernel, today's launch): the same bits by contract
@@ -163,18 +233,26 @@ pub fn run(gpu: Gpu, k: *const dsv41.Kernels, dir: []const u8) !Outcome {
         const ticket_name = storageOf(jargs[18]).?;
         const q = args[0].tensor;
         const hb: usize = @intCast(@divTrunc(q.shape[1], 16));
-        for ([_]i64{ 1, 4 }) |p| {
-            const v = try a.alloc(replay.Arg, 24);
-            @memcpy(v[0..23], args);
-            var t = args[18].tensor;
-            t.ptr = try c.zeros(gpu, @as(usize, @intCast(q.shape[0])) * hb * dsv41.ops.attn.MAXP * 4);
-            v[18] = .{ .tensor = t };
-            v[23] = .{ .int = p };
-            try upload(gpu, fx, storages);
-            if (!try replay.call(k, stream, ext, func, v, kws.items, &scratch)) return error.VariantNotBound;
-            try stream.synchronize();
-            try compare(gpu, fx, storages, if (p == 1) "attn split 1" else "attn split 4", ticket_name);
-            variants += 1;
+        for ([_]bool{ false, true }) |planted| {
+            if (planted and !identity_dump.active()) continue;
+            var plant: adversarial.Plant = .{};
+            if (planted) plant = try adversarial.attention(gpu, fx, a, call);
+            for ([_]i64{ 1, 4 }) |p| {
+                const extra_start = c.extra.items.len;
+                const v = try a.alloc(replay.Arg, 24);
+                @memcpy(v[0..23], args);
+                var t = args[18].tensor;
+                t.ptr = try c.zeros(gpu, @as(usize, @intCast(q.shape[0])) * hb * dsv41.ops.attn.MAXP * 4);
+                v[18] = .{ .tensor = t };
+                v[23] = .{ .int = p };
+                try upload(gpu, fx, storages, if (planted) &plant else null);
+                if (!try replay.call(k, stream, ext, func, v, kws.items, &scratch)) return error.VariantNotBound;
+                try stream.synchronize();
+                const what = if (p == 1) "attn split 1" else "attn split 4";
+                const variant = if (p == 1) "attn-split-1" else "attn-split-4";
+                try finish(gpu, fx, &c, storages, what, ticket_name, .{ .dir = dir, .call = call, .variant = variant, .fill = if (planted) "identity" else "recorded", .extra_start = extra_start, .split = p }, planted);
+                if (!planted) variants += 1;
+            }
         }
     }
     if (std.mem.eql(u8, ext, "tf_dsv41_mhc_cuda_v1") and std.mem.eql(u8, func, "run") and args.len == 24) {
@@ -193,7 +271,7 @@ pub fn run(gpu: Gpu, k: *const dsv41.Kernels, dir: []const u8) !Outcome {
             v[17] = .{ .tensor = t };
             v[24] = .{ .int = 0 }; // spin 0: the parallel tail, no waiting
             v[25] = .{ .int = @intFromBool(deferred) };
-            try upload(gpu, fx, storages);
+            try upload(gpu, fx, storages, null);
             if (!try replay.call(k, stream, ext, func, v, kws.items, &scratch)) return error.VariantNotBound;
             if (deferred) {
                 // coef_kernel: (part, base, scale, opre, opost, ocomb, R, eps, hc_eps, post_alpha, iters)
@@ -201,7 +279,9 @@ pub fn run(gpu: Gpu, k: *const dsv41.Kernels, dir: []const u8) !Outcome {
                 if (!try replay.call(k, stream, ext, "coef", &cv, &.{}, &scratch)) return error.VariantNotBound;
             }
             try stream.synchronize();
-            try compare(gpu, fx, storages, if (deferred) "mhc tail + defer" else "mhc tail", cnt_name);
+            const what = if (deferred) "mhc tail + defer" else "mhc tail";
+            const variant = if (deferred) "mhc-tail-defer" else "mhc-tail";
+            try finish(gpu, fx, &c, storages, what, cnt_name, .{ .dir = dir, .call = call, .variant = variant, .fill = "recorded", .extra_start = c.extra.items.len - 1 }, false);
             variants += 1;
         }
     }

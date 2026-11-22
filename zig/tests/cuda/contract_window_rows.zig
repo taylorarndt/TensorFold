@@ -5,6 +5,7 @@ const core = @import("core");
 const rig_ = @import("contract_rig.zig");
 const wc = @import("window_rows_check.zig");
 const wt = @import("window_rows_tests.zig");
+const identity = @import("identity_cases.zig");
 
 const contract = core.contract;
 const c = contract.spec;
@@ -173,7 +174,7 @@ pub const Rows = struct {
     }
 
     pub fn kernel(self: *Rows) g.Kernel {
-        return .{ .spec = spec(self.f), .ctx = self, .vt = &vt, .control = if (self.f.ctl != .none) .shapes else null };
+        return .{ .spec = spec(self.f), .ctx = self, .vt = &vt, .control = if (self.f.ctl != .none) .shapes else null, .adversarial = self.f.ctl == .none };
     }
 
     const vt = g.hooks(Rows);
@@ -285,6 +286,7 @@ pub const Rows = struct {
             .nonfinite => self.plant(q, kc, vc),
             .stress => try self.stress(rng, kc, vc),
         }
+        if (identity.requested(seed)) self.identityPlant(q, kc, vc);
         for ([_][]const u8{ std.mem.sliceAsBytes(q), std.mem.sliceAsBytes(kc), std.mem.sliceAsBytes(vc), std.mem.sliceAsBytes(pos), std.mem.sliceAsBytes(slot), std.mem.sliceAsBytes(hi) }, &self.dev) |bytes, *p| p.* = try self.rig.input(bytes);
         self.placed = null;
         if (f.pages > 0) try self.place(a, rng, kc, vc);
@@ -293,6 +295,29 @@ pub const Rows = struct {
         self.fns = try self.kernels();
         self.half = try a.alloc(f64, self.count());
         return true;
+    }
+
+    /// Finite A/B: decode/prompt maxima rise 0, 1, 2 then tie; values include signed zeros and subnormals.
+    fn identityPlant(self: *Rows, q: []u16, kc: []u16, vc: []u16) void {
+        const f = self.f;
+        const r = self.call.rows - 1;
+        const w = self.call.at(r);
+        const lo = self.call.first(w.p);
+        const tile: usize = if (f.prompt) 32 else 256;
+        @memset(q[r * f.h * f.d ..][0..f.d], 0);
+        q[r * f.h * f.d] = bfr.bits(1);
+        for (lo..w.last + 1) |key| {
+            const t = key / tile - lo / tile;
+            const score: f32 = @floatFromInt(@min(t, 2));
+            self.cell(kc, r, key, 0)[0] = bfr.bits(score);
+            const v = self.cell(vc, r, key, 0);
+            v[0] = 0x0001;
+            v[1] = 0x8001;
+            v[2] = 0;
+            v[3] = 0x8000;
+            v[4] = bfr.bits(if (t % 2 == 0) @as(f32, 1) else -2);
+            v[5] = bfr.bits(if (key % 2 == 0) @as(f32, 3) else -3);
+        }
     }
 
     fn cell(self: *Rows, x: []u16, r: usize, key: usize, kh: usize) []u16 {

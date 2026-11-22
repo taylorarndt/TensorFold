@@ -1,3 +1,6 @@
+#ifndef TF_CUDA_SOFTMAX_IDENTITY_GUARD
+#define TF_CUDA_SOFTMAX_IDENTITY_GUARD 1
+#endif
 // Score absorbed queries against retained BF16 cache rows. The retained slots already include any causal limit.
 #include <cuda_bf16.h>
 #include <stdint.h>
@@ -27,10 +30,10 @@ extern "C" __global__ void __launch_bounds__(128) tf_hy4_attend_merge(
     float acc[4] = {};
     for (int i = 0; i < chunks; ++i) {
         const int64_t base = i * plane + row_head;
-        const float p = expf(maxima[base] - top);
-        denom = __fmaf_rn(mass[base], p, denom);
+        const bool same = TF_CUDA_SOFTMAX_IDENTITY_GUARD && isfinite(top) && top == maxima[base]; const float p = same ? 1.0f : expf(maxima[base] - top);
+        denom = (same && isfinite(__fadd_rn(mass[base], denom))) ? __fadd_rn(mass[base], denom) : __fmaf_rn(mass[base], p, denom);
         #pragma unroll
-        for (int j = 0; j < 4; ++j) acc[j] = __fmaf_rn(numerator[base * latent + column + j], p, acc[j]);
+        for (int j = 0; j < 4; ++j) acc[j] = (same && isfinite(__fadd_rn(numerator[base * latent + column + j], acc[j]))) ? __fadd_rn(numerator[base * latent + column + j], acc[j]) : __fmaf_rn(numerator[base * latent + column + j], p, acc[j]);
     }
     #pragma unroll
     for (int j = 0; j < 4; ++j) output[row_head * latent + column + j] = __float2bfloat16_rn(acc[j] / denom);

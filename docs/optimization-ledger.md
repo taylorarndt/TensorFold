@@ -34,6 +34,7 @@ CUDA candidate bytes, parity and served/speed qualification are pending.
 Metal identity-rescale guards are in review. Raw-output device A/B and whole-round gain are unmeasured;
 no Metal family is marked done for this preparation.
 CUDA identity-rescale guards are in review. Raw-output device A/B and whole-round gain are unmeasured;
+no CUDA family is marked done for this preparation.
 
 ## The table
 

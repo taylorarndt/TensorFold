@@ -17,10 +17,12 @@ pub fn hostTests(b: *std.Build, family: *std.Build.Step) void {
     b.step("test-kernel-seed-host", "Named contract fixtures keep their seed when entries are inserted").dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = module(b, b.graph.host, .debug), .filters = &.{"contract seed:"} })).step);
     const step = b.step("test-kernel-contract", "The kernel contract's host tests: gate logic, controls, every launch against every chip");
     step.dependOn(&run.step);
-    const identity = b.step("test-softmax-identity-host", "Metal identity-rescale bit references, nonfinite controls and source coverage");
-    const identity_run = b.addRunArtifact(b.addTest(.{ .root_module = b.createModule(.{ .root_source_file = b.path("zig/metal_softmax_identity_host.zig"), .target = b.graph.host, .optimize = .debug }) }));
-    identity.dependOn(&identity_run.step);
-    step.dependOn(&identity_run.step);
+    const identity = b.step("test-softmax-identity-host", "CUDA and Metal identity-rescale bit references, nonfinite controls and source coverage");
+    for ([_][]const u8{ "zig/cuda_softmax_identity_host.zig", "zig/metal_softmax_identity_host.zig" }) |path| {
+        const identity_run = b.addRunArtifact(b.addTest(.{ .root_module = b.createModule(.{ .root_source_file = b.path(path), .target = b.graph.host, .optimize = .debug }) }));
+        identity.dependOn(&identity_run.step);
+        step.dependOn(&identity_run.step);
+    }
     const q27_pages = b.addRunArtifact(b.addTest(.{ .root_module = b.createModule(.{
         .root_source_file = b.path("zig/tests/contract/q27_paged_cases.zig"),
         .target = b.graph.host,

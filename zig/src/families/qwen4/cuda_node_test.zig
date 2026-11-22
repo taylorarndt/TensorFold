@@ -3,6 +3,9 @@ const std = @import("std");
 const n = @import("../../../tests/qwen4/numeric_gpu.zig");
 const f = @import("device_fixture.zig");
 const t = std.testing;
+test {
+    _ = @import("cuda_online_ab_test.zig");
+}
 fn read(_: *n.B, buffer: n.B.Buffer, out: []u8) !void {
     @memcpy(out, buffer[0..out.len]);
 }

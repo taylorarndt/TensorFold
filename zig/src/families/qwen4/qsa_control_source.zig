@@ -75,7 +75,7 @@ pub fn selection(a: std.mem.Allocator, production: []const u8, control: Control)
 
 pub fn attention(a: std.mem.Allocator, production: []const u8, control: Control) ![]u8 {
     if (control == .production) return a.dupe(u8, production);
-    if (control == .sums) return edit.once(a, production, "o[i] = fma(e, float(vb[key + i]), o[i] * f);", "o[i] = float(half(fma(e, float(vb[key + i]), o[i] * f)));");
+    if (control == .sums) return edit.once(a, production, "o[i] = fma(e, float(vb[key + i]), (same && isfinite(o[i])) ? o[i] : o[i] * f);", "o[i] = float(half(fma(e, float(vb[key + i]), (same && isfinite(o[i])) ? o[i] : o[i] * f)));");
     var arena: std.heap.ArenaAllocator = .init(a);
     defer arena.deinit();
     const mem = arena.allocator();

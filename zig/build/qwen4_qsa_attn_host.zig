@@ -8,13 +8,33 @@ pub fn wire(b: *std.Build, module: *std.Build.Module) void {
     module.addIncludePath(b.path("zig/tests/qwen4"));
     module.addCSourceFile(.{ .file = b.addWriteFiles().add("qwen4_qsa_attn_host.cpp", text), .flags = &.{ "-std=c++20", "-fno-exceptions", "-fno-fast-math", "-ffp-contract=off", "-fno-strict-aliasing" } });
 }
+// Reconstruct base 1eed88bb09: every exp and old-state multiply removed by KP10 is restored.
+fn legacy(a: std.mem.Allocator, production: []const u8) ![]const u8 {
+    var text = production;
+    for ([_][2][]const u8{
+        .{ "const bool same = TF_METAL_SOFTMAX_IDENTITY_GUARD && mn == m && isfinite(m);", "" },
+        .{ "const float f = same ? 1.0f : metal::exp(m - mn), e = metal::exp(sc - mn);", "const float f = metal::exp(m - mn), e = metal::exp(sc - mn);" },
+        .{ "l = (same && isfinite(l + e)) ? l + e : fma(l, f, e);", "l = fma(l, f, e);" },
+        .{ "(same && isfinite(o[i])) ? o[i] : o[i] * f", "o[i] * f" },
+        .{ "const bool same = TF_METAL_SOFTMAX_IDENTITY_GUARD && m == top && isfinite(m);", "" },
+        .{ "const float mine = m == -INFINITY ? 0.0f : (same ? 1.0f : metal::exp(m - top));", "const float mine = m == -INFINITY ? 0.0f : metal::exp(m - top);" },
+        .{ "tile[g][lane * PER + i] = (same && isfinite(o[i])) ? o[i] : o[i] * mine;", "tile[g][lane * PER + i] = o[i] * mine;" },
+        .{ "(TF_METAL_SOFTMAX_IDENTITY_GUARD && ms[k] == top && isfinite(ms[k]) && isfinite(ls[k]) ? ls[k] : ls[k] * metal::exp(ms[k] - top))", "ls[k] * metal::exp(ms[k] - top)" },
+        .{ "const bool same = TF_METAL_SOFTMAX_IDENTITY_GUARD && mk == top && isfinite(mk);", "" },
+        .{ "const float w = mk == -INFINITY ? 0.0f : (same ? 1.0f : metal::exp(mk - top));", "const float w = mk == -INFINITY ? 0.0f : metal::exp(mk - top);" },
+        .{ "total = (same && isfinite(PM[(at + k) * 2 + 1] + total)) ? PM[(at + k) * 2 + 1] + total : fma(PM[(at + k) * 2 + 1], w, total);", "total = fma(PM[(at + k) * 2 + 1], w, total);" },
+        .{ "acc = (same && isfinite(PO[(at + k) * D + d] + acc)) ? PO[(at + k) * D + d] + acc : fma(PO[(at + k) * D + d], w, acc);", "acc = fma(PO[(at + k) * D + d], w, acc);" },
+    }) |r| text = try edit.once(a, text, r[0], r[1]);
+    return text;
+}
 pub fn generate(a: std.mem.Allocator) ![]const u8 {
     const production = try gen.source(a, .{ .heads = 24, .kv = 4, .index_heads = 4, .index_dim = 128, .rotary = 64, .ratio = 8, .top = 128 });
     var out: std.Io.Writer.Allocating = .init(a);
-    try out.writer.writeAll("#define TF_METAL_STRICT_BFLOAT 1\n#include \"hc_native_support.h\"\n");
+    try out.writer.writeAll("#define TF_METAL_STRICT_BFLOAT 1\n#define TF_METAL_SOFTMAX_IDENTITY_GUARD 1\n#include \"hc_native_support.h\"\n");
     try out.writer.writeAll(@import("../src/families/qwen4/metal_control.zig").declaration);
-    for (std.enums.values(ctl.Control), 0..) |control, i| {
-        const all = try ctl.attention(a, production, control);
+    for (0..6) |i| {
+        const control: ?ctl.Control = if (i < 5) @as(ctl.Control, @fromBackingInt(@intCast(i))) else null;
+        const all = if (control) |which| try ctl.attention(a, production, which) else try legacy(a, production);
         var text = try std.mem.concat(a, u8, &.{ try edit.function(all, "void qwen4_attn_parts("), "\n", try edit.function(all, "void qwen4_attn_merge(") });
         for ([_][2][]const u8{
             .{ "const device ", "const " },           .{ "device ", "" },                                      .{ "const constant ", "const " },               .{ "constant ", "const " },
@@ -35,10 +55,11 @@ pub fn generate(a: std.mem.Allocator) ![]const u8 {
             \\}}
             \\}}
             \\
-        , .{if (control == .repeat) "control_params," else ""});
+        , .{if (i == @backingInt(ctl.Control.repeat)) "control_params," else ""});
     }
     try out.writer.writeAll("extern \"C\" void tf_q4_qsa_attn_cpu(int control,const unsigned char* const* in,float* po,float* pm,unsigned short* out,int rows,int keys,unsigned repeat){switch(control){\n");
     for (0..5) |i| try out.writer.print("case {d}:qa{d}::run(in,po,pm,out,rows,keys,repeat);return;\n", .{ i, i });
     try out.writer.writeAll("default:std::abort();}}\n");
+    try out.writer.writeAll("extern \"C\" void tf_q4_qsa_attn_legacy_cpu(const unsigned char* const* in,float* po,float* pm,unsigned short* out,int rows,int keys,unsigned repeat){qa5::run(in,po,pm,out,rows,keys,repeat);}\n");
     return out.toOwnedSlice();
 }

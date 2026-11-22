@@ -5,6 +5,7 @@ const core = @import("core");
 const rig_ = @import("contract_rig.zig");
 const ref = @import("contract_h3_ref.zig");
 const prep = @import("contract_h3_prep.zig");
+const identity_cases = @import("identity_cases.zig");
 
 const contract = core.contract;
 const c = contract.spec;
@@ -95,7 +96,7 @@ pub const H3 = struct {
     }
 
     pub fn kernel(self: *H3) g.Kernel {
-        return .{ .spec = spec(self.which), .ctx = self, .vt = &vt };
+        return .{ .spec = spec(self.which), .ctx = self, .vt = &vt, .adversarial = self.which == .attention };
     }
 
     const vt = g.hooks(H3);
@@ -158,7 +159,8 @@ pub const H3 = struct {
         self.fresh = &.{};
         self.shape = shape;
         var prng = std.Random.DefaultPrng.init(seed);
-        return prep.prepare(self, shape, fill, prng.random());
+        const adversarial = self.which == .attention and fill == .random and identity_cases.requested(seed);
+        return prep.prepare(self, shape, fill, prng.random(), adversarial);
     }
 
     pub fn run(self: *H3) !void {

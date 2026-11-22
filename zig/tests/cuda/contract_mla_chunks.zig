@@ -4,6 +4,7 @@ const cuda = @import("cuda");
 const core = @import("core");
 const rig_ = @import("contract_rig.zig");
 const pages = @import("contract_glm_pages.zig");
+const identity_cases = @import("identity_cases.zig");
 
 const contract = core.contract;
 const c = contract.spec;
@@ -81,7 +82,7 @@ pub const Chunks = struct {
 
     pub fn kernel(self: *Chunks) g.Kernel {
         const s: c.Spec = .{ .name = name(self.split != null, self.fault), .accum = .f32, .depth = attnDepth, .ops = 8, .out = .bf16, .served = &chunk_shapes, .sums = .{ .f16 = 0, .bf16 = 0, .exact = false, .why = soft_why } };
-        return .{ .spec = s, .ctx = self, .vt = &vt, .control = if (self.fault != .none) .shapes else null };
+        return .{ .spec = s, .ctx = self, .vt = &vt, .control = if (self.fault != .none) .shapes else null, .adversarial = self.fault == .none };
     }
 
     const vt = g.hooks(Chunks);
@@ -109,6 +110,7 @@ pub const Chunks = struct {
             self.cache[9] = c.toBf16(std.math.inf(f32));
             self.cache[2 * kw + 530] = c.toBf16(-std.math.inf(f32)); // key 2, a roped column: scores only
         }
+        if (fill == .random and identity_cases.requested(seed)) self.adversarial();
         const p: i32 = @intCast(self.at);
         const cnt: i32 = 0;
         if (self.fault == .next_head) {
@@ -126,6 +128,33 @@ pub const Chunks = struct {
         self.out = try self.rig.output(shape.rows * self.heads * lw * 2);
         if (self.split != null) try splitPrepare(self);
         return true;
+    }
+
+    /// The fullest row has tied maxima in adjacent chunks, then a changed maximum, plus special bf16 bits in Q/K/V.
+    fn adversarial(self: *Chunks) void {
+        const r = self.shape.rows - 1;
+        const n = self.at + r + 1;
+        const q = self.q[(r * self.heads) * kw ..][0..kw];
+        @memset(q, 0);
+        q[0] = c.toBf16(1);
+        q[1] = 0x8000;
+        q[2] = 0x0001;
+        q[3] = 0x8001;
+        q[4] = 0x007f;
+        q[5] = 0x807f;
+        for (0..n) |j| @memset(self.cache[j * kw ..][0..kw], 0);
+        const tile = @min(512, (n - 1) / 2);
+        if (tile == 0) return;
+        const spots = [3]usize{ tile - 1, tile, @min(2 * tile, n - 1) };
+        for (spots, 0..) |j, i| {
+            const kv = self.cache[j * kw ..][0..kw];
+            kv[0] = c.toBf16(if (i < 2) 16 else 32);
+            kv[1] = 0x8000;
+            kv[2] = 0x0001;
+            kv[3] = 0x8001;
+            kv[4] = 0x007f;
+            kv[5] = 0x807f;
+        }
     }
 
     pub fn run(self: *Chunks) !void {

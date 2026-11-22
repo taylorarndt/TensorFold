@@ -19,7 +19,7 @@ pub fn generate(a: std.mem.Allocator) ![]const u8 {
         text = try std.mem.concat(a, u8, &.{ text[0..at], text[end..] });
     }
     return std.mem.concat(a, u8, &.{
-        "#define TF_METAL_STRICT_BFLOAT 1\n#include \"hc_native_support.h\"\n", text,
+        "#define TF_METAL_STRICT_BFLOAT 1\n#define TF_METAL_SOFTMAX_IDENTITY_GUARD 1\n#include \"hc_native_support.h\"\n", text,
         \\extern "C" void tf_q4_node_attention(const uint16_t* q,const uint16_t* k,const uint16_t* v,const int32_t* ids,int count,uint16_t* output) {
         \\  const int ks[3]={1,1,count},is[2]={1,count},sparse=1;const float scale=0.0625f;
         \\  float po[16*256],pm[16*2];
