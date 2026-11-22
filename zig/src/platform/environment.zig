@@ -259,6 +259,7 @@ pub const rules = [_]Rule{
     .{ .name = "TF_FLASHNEXT_BATCH_HEADS", .scope = .flashnext, .kind = .flag, .forms = "0 or 1 (default 1)" },
     .{ .name = "TF_FLASHNEXT_SAMPLED_HEADS", .scope = .flashnext, .kind = .flag, .forms = "0 or 1 (default 1)" },
     .{ .name = "TF_FLASHNEXT_SHARED_DRAFTS", .scope = .flashnext, .kind = .flag, .forms = "0 or 1 (default 1)" },
+    .{ .name = "TF_FLASHNEXT_PLAN_SKIP", .scope = .flashnext, .kind = .flag, .forms = "0 or 1 (default 0)" },
     .{ .name = "TF_FLASHNEXT_SHARED_SIDE", .scope = .flashnext, .kind = .flag, .forms = "0 or 1 (default 1)" },
     .{ .name = "TF_FLASHNEXT_HC_FUSE", .scope = .flashnext, .kind = .flag, .forms = "0 or 1 (default 1)" },
     .{ .name = "TF_FLASHNEXT_READOUT_FUSED", .scope = .flashnext, .kind = .flag, .forms = "0 or 1 (default 0)" },
