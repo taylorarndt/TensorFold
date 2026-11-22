@@ -119,6 +119,7 @@ pub const Runner = struct {
         }
         var pool = try GdnPool.init(a, m.device, try abi.Shape.init(m.config), ng, slots, m.frame.capacity);
         errdefer pool.deinit();
+        pool.conv_in_place = try @import("sys").environment.read(bool, "TF_Q27_CONV_INPLACE", false);
         const pipelines = @import("core").startup_receipt.span(.runtime_pipelines);
         const units = m.device.tensorUnits();
         // before M5 the tail attention reads its tensor-op results in the simdgroup-matrix layout (simd_attention.zig)
@@ -431,10 +432,7 @@ pub const Runner = struct {
         try ops.metadata(e, result, keep_ref, rows, null, p);
         e.barrier();
         const plan = @import("gdn_pool_gpu.zig").DevicePlan{ .host = recurrent, .metadata = m };
-        for (0..r.gdn.budget.layers) |gi| try r.gdn.commitScan(gi, plan, e);
-        e.barrier();
-        for (0..r.gdn.budget.layers) |gi| try r.gdn.commitPublish(gi, plan, e);
-        e.barrier();
+        try r.gdn.commitLayers(plan, e);
         var ai: usize = 0;
         for (r.model.weights.layers) |layer| switch (layer.mixer) {
             .linear => {},
