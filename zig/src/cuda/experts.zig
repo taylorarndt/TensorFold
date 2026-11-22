@@ -338,15 +338,15 @@ pub const Fp8Experts = struct {
     }
 };
 
-/// NVFP4 experts (nvfp4_experts.cu): decode rows 16 pairs at a time; prompt rows staged, 64 pairs a CTA.
+/// NVFP4 experts (nvfp4_experts.cu): 16-pair decode rows; 64-pair or optional 128-pair prompt CTAs.
 pub const Nvfp4Experts = struct {
     mod: Module,
     fns: [7]Function, // by Epi, then relu^2 up, then experts_waves.zig's
     resident: [7]usize, // blocks the grid may hold: per SM times SMs
     prompt_fns: [3]Function, // relu^2 up, SwiGLU gate-up, bf16 sums down
     fact_fns: [2]Function, // the decode form's sums on prompt tiles: SwiGLU gate-up, fp32 down
-    warps: usize = 4,
-
+    fact128_fns: [2]Function, // optional WM=2 twins with unchanged per-row FACT arithmetic
+    warps: usize, // resident decode warp count
     pub const cols = 32; // output columns a block
     pub const words = 144; // int32 a (32 columns, 32 inputs) block: 128 code words, then 16 of e4m3 scales
 
@@ -357,19 +357,25 @@ pub const Nvfp4Experts = struct {
         pub const up_relu2 = "_ZN16tf_nvfp4_experts19nvfp4_expert_kernelILi1ELi1ELi4EEEvPK13__nv_bfloat16iiPK5uint4PKfiiPKiSA_SA_Pvifi";
         pub const prompt = [3][:0]const u8{ "tf_nvfp4_prompt_relu2", "tf_nvfp4_prompt_swiglu", "tf_nvfp4_prompt_down" };
         pub const fact = [2][:0]const u8{ "tf_nvfp4_fact_swiglu", "tf_nvfp4_fact_down_f32" };
+        pub const fact128 = [2][:0]const u8{ "tf_nvfp4_fact128_swiglu", "tf_nvfp4_fact128_down_f32" };
     };
 
-    /// The fact entries' warps a CTA (32-column blocks): SwiGLU gate-up, fp32 down; their parts, 2 and 1.
+    /// The fact entries' WN warps a CTA (32-column blocks): SwiGLU gate-up, fp32 down; their parts, 2 and 1.
     pub const fact_wn = [2]usize{ 4, 8 };
+    pub const fact128_wn = [2]usize{ 4, 4 }; // WM=2, RT=4: 128 rows and 256 threads for both entries
 
     /// The prompt entries' warps (32-column blocks) a CTA: relu^2 up, SwiGLU gate-up, down (GB10's fastest tiles).
     pub const prompt_wn = [3]usize{ 8, 4, 8 };
 
-    /// Prompt4<M, 4, 1, WN>'s dynamic shared bytes: stages of 64 rows' 64 inputs, then WN x 2 blocks of `parts`.
-    pub fn promptSmem(parts: usize, wn: usize) u32 {
-        const stage: u32 = @intCast((64 * 8 + wn * 2 * parts * 36) * 16);
+    /// Prompt4<M, 4, WM, WN>'s dynamic shared bytes: stages of 64*WM rows' 64 inputs, then WN x 2 blocks.
+    pub fn promptSmemWM(parts: usize, wm: usize, wn: usize) u32 {
+        const stage: u32 = @intCast((64 * wm * 8 + wn * 2 * parts * 36) * 16);
         const stages: u32 = if (stage * 4 <= 49152) 4 else if (stage * 3 <= 49152) 3 else 2;
         return stages * stage;
+    }
+
+    pub fn promptSmem(parts: usize, wn: usize) u32 {
+        return promptSmemWM(parts, 1, wn);
     }
 
     pub fn decodeWarps(value: ?[]const u8) !usize {
@@ -390,7 +396,7 @@ pub const Nvfp4Experts = struct {
         if (!kernels.available) return error.BuiltWithoutKernels;
         var mod = try Module.load(d, kernels.nvfp4_experts);
         errdefer mod.unload();
-        var e: Nvfp4Experts = .{ .mod = mod, .fns = undefined, .resident = undefined, .prompt_fns = undefined, .fact_fns = undefined, .warps = warps };
+        var e: Nvfp4Experts = .{ .mod = mod, .fns = undefined, .resident = undefined, .prompt_fns = undefined, .fact_fns = undefined, .fact128_fns = undefined, .warps = warps };
         for ([_][:0]const u8{ symbols.gate_up, symbols.down_f32, symbols.down_bf16, symbols.up_relu2 } ++ @import("experts_waves.zig").symbols, 0..) |name, i| {
             var narrow: [256]u8 = undefined;
             const selected = if (warps == 1) blk: {
@@ -410,6 +416,10 @@ pub const Nvfp4Experts = struct {
         for (symbols.fact, &e.fact_fns, [2]usize{ 2, 1 }, fact_wn) |name, *f, parts, wn| {
             f.* = try mod.function(name);
             try f.allowDynamicShared(promptSmem(parts, wn));
+        }
+        for (symbols.fact128, &e.fact128_fns, [2]usize{ 2, 1 }, fact128_wn) |name, *f, parts, wn| {
+            f.* = try mod.function(name);
+            try f.allowDynamicShared(promptSmemWM(parts, 2, wn));
         }
         return e;
     }
@@ -465,8 +475,9 @@ pub const Nvfp4Experts = struct {
         try launch_.launch(e.prompt_fns[fi], cfg, s, &a);
     }
 
-    /// The decode form's sums on the prompt tiles (experts_fact.zig).
+    /// The decode form's sums on the prompt tiles (experts_fact.zig); FACT128 is the opt-in WM=2 twin.
     pub const runFact = @import("experts_fact.zig").runFact;
+    pub const runFact128 = @import("experts_fact.zig").runFact128;
 
     /// Bytes of `count` experts' blocks for n outputs from k inputs: [E][n/32][k/32][parts][144] int32.
     pub fn bytes(count: usize, n: usize, k: usize, parts: usize) usize {

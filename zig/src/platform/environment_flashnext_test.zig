@@ -42,6 +42,14 @@ test "Flash Next strict env: the table holds all 37 settings: 25 switches, 9 int
     try t.expectEqual([4]usize{ 25, 9, 1, 2 }, counts);
 }
 
+test "Flash Next strict env: FACT_ROWS keeps its default, wide opt-in and legacy thresholds" {
+    const name = "TF_FLASHNEXT_FACT_ROWS";
+    for ([_][]const u8{ "0", "32", "64", "128" }) |raw| try check(name, raw, true);
+    try t.expectEqual(@as(u64, 64), try e.value(u64, name, null, 64));
+    try t.expectEqual(@as(u64, 128), try e.value(u64, name, "128", 64));
+    for ([_][]const u8{ "-1", "128.0", "pairs" }) |raw| try check(name, raw, false);
+}
+
 test "Flash Next strict env: unset and blank settings both read as the caller's default" {
     for (e.rules) |r| if (r.scope == .flashnext) for ([_]?[]const u8{ null, "", " ", "\t", " \t\r\n" }) |raw| {
         if (raw) |v| try check(r.name, v, true);
