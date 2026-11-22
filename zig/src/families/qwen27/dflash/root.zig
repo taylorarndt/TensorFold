@@ -20,4 +20,5 @@ test {
     _ = @import("runtime_context.zig");
     _ = @import("fixtures.zig");
     _ = @import("execution_test.zig");
+    _ = @import("barrier_plan_test.zig");
 }

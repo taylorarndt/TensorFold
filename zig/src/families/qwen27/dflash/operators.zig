@@ -81,6 +81,9 @@ pub const Ops = struct {
         context_abort: *const fn (*anyopaque, u64) void,
         // a batched pass's stream k.
         stream_append: *const fn (*anyopaque, u64, u32, u32, View, View, []const u64) anyerror!void,
+        // TF_Q27_DRAFT_CONCURRENT: whether independent linears overlap, and leave the next op's closing barrier out.
+        overlaps: ?*const fn (*anyopaque) bool = null,
+        overlap_next: ?*const fn (*anyopaque, u64) anyerror!void = null,
     };
 };
 

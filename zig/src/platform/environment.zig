@@ -93,6 +93,7 @@ pub const rules = [_]Rule{
     .{ .name = "TF_Q27_COPY_ROWS", .scope = .metal, .kind = .u32, .forms = "a whole number from 0 to 4294967295 (0 disables copied rows)" },
     .{ .name = "TF_Q27_DRAFT_SLOTS", .scope = .metal, .kind = .u32, .forms = "a whole number from 0 to 4294967295 (clamped to the current stream bounds)" },
     .{ .name = "TF_Q27_CONV_INPLACE", .scope = .metal, .kind = .flag, .forms = "0 or 1 (default 0; 1 commits a Qwen3.8-27B keep's GDN conv window in place, same bytes)" },
+    .{ .name = "TF_Q27_DRAFT_CONCURRENT", .scope = .metal, .kind = .flag, .forms = "0 or 1 (default 0; 1 overlaps DFlash2's independent linears on a concurrent encoder, same bytes)" },
     .{ .name = "TF_HEAD_GEOMETRY", .scope = .metal, .kind = .size, .forms = "a whole nonnegative native-size geometry count" },
     .{ .name = "TF_PROMPT_ROWS", .scope = .metal, .kind = .prompt, .forms = "a multiple of 16 from 128 to 2048 for native serving" },
     .{ .name = "TF_ANE_COLUMNS", .scope = .metal, .kind = .u32, .forms = "a whole column count from 0 to 4294967295 (0 disables the share)" },
