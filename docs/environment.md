@@ -143,7 +143,7 @@ Direct family readers also refuse malformed values when called without the serve
 
 ## Flash Next
 
-Flash Next checks these 36 settings when its engine loads, before any device or checkpoint work: a malformed value
+Flash Next checks these 38 settings when its engine loads, before any device or checkpoint work: a malformed value
 stops the start with the variable, the supplied text and the accepted forms.
 
 | Variable | Accepted explicit value |
@@ -155,6 +155,7 @@ stops the start with the variable, the supplied text and the accepted forms.
 | `TF_FLASHNEXT_FIRST_EARLY` | Exactly `0` or `1`; default on |
 | `TF_FLASHNEXT_GPU_TOPK` | Exactly `0` or `1`; default on |
 | `TF_FLASHNEXT_GDN_FUSED` | Exactly `0` or `1`; default on |
+| `TF_FLASHNEXT_GDN_CHAIN_TPR` | Exactly `0` or `1`; default off: opt into the two-thread reduction for ordinary recurrence rows below 64 |
 | `TF_FLASHNEXT_GDN_LANES` | Exactly `0` or `1`; default on |
 | `TF_FLASHNEXT_BATCH_HEADS` | Exactly `0` or `1`; default on |
 | `TF_FLASHNEXT_SAMPLED_HEADS` | Exactly `0` or `1`; default on |
