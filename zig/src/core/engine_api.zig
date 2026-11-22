@@ -89,8 +89,11 @@ pub const Benchmark = @import("benchmark_info.zig").Snapshot;
 /// A reranker's label tokens: a prompt's relevance score is sigmoid(yes - no) of their last-row logits.
 pub const Rerank = struct { yes: u32, no: u32 };
 
+pub const DraftKv = lanes.config.DraftKv;
+
 /// What the engine serves, fixed once it has loaded.
 pub const Info = struct {
+    draft_kv: ?DraftKv = null,
     /// The loaded world; multi-rank engines override the local engine's one before publication.
     benchmark_ranks: ?u32 = 1,
     /// Frozen public startup inventory, owned by the engine; never invokes an HTTP-thread collective.
