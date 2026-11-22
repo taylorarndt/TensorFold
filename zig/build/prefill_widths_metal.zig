@@ -2,6 +2,13 @@
 const std = @import("std");
 
 pub fn tests(b: *std.Build, parent: *std.Build.Step) void {
+    const subset = b.createModule(.{
+        .root_source_file = b.path("zig/src/core/grammar_head_subset.zig"),
+        .target = b.graph.host,
+    });
+    const subset_run = b.addRunArtifact(b.addTest(.{ .root_module = subset }));
+    b.step("test-grammar-head-subset-host", "Grammar head policy and reference logit bits").dependOn(&subset_run.step);
+    parent.dependOn(&subset_run.step);
     const lanes = b.createModule(.{ .root_source_file = b.path("zig/src/core/lanes/lanes.zig"), .target = b.graph.host, .link_libc = true });
     const root = b.createModule(.{ .root_source_file = b.path("zig/src/families/nemotron/prompt_flight_test.zig"), .target = b.graph.host, .optimize = .debug, .link_libc = true, .imports = &.{.{ .name = "lanes", .module = lanes }} });
     const run = b.addRunArtifact(b.addTest(.{ .root_module = root, .filters = &.{"Nemotron prefill widths:"} }));

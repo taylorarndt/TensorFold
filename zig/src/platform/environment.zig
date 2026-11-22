@@ -40,6 +40,8 @@ pub fn isReal(kind: Kind) bool {
 }
 
 pub const rules = [_]Rule{
+    .{ .name = "TF_GRAMMAR_HEAD_SUBSET", .scope = .nemotron, .kind = .flag, .forms = "0 or 1 (default 0; Metal Bolt grammar head)" },
+    .{ .name = "TF_GRAMMAR_HEAD_SUBSET_MAX", .scope = .nemotron, .kind = .u32, .forms = "maximum legal tokens (default 512; 0 disables the subset)" },
     .{ .name = "TF_QWEN_KV_HOST_GIB", .scope = .cuda, .kind = .u64, .min = 1, .max = std.math.maxInt(u64) >> 30, .forms = "positive whole GiB fitting an unsigned 64-bit byte count; blank or unset: one full KV window" },
     .{ .name = "TF_CACHE_EVICT", .scope = .common, .kind = .word, .words = &.{ "main", "decayed_resume" }, .forms = "main or decayed_resume (default main)" },
     .{ .name = "TF_FLASHNEXT_BATCH_DRAWS", .scope = .cuda, .kind = .flag, .blank_default = false, .forms = "0 or 1 (0 restores per-stream Flash Next row draws; default 1)" },
