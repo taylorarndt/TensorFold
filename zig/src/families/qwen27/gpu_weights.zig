@@ -432,6 +432,8 @@ pub fn loadMtp(w: *Weights, device: mtl.Device, checkpoint: *const cp.Checkpoint
         try lane.regOrder(device, jobs.items);
     }
     w.mtp = head;
+}
+
 /// Whether 4-bit g64 matrices stay in weight_layout for qk: a GPU that builds qk, unless TF_Q27_QK=0.
 pub fn qkLayout(allocator: std.mem.Allocator, device: mtl.Device) !bool {
     if (!try @import("sys").environment.read(bool, "TF_Q27_QK", true)) return false;

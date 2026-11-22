@@ -26,6 +26,7 @@ const prefillStep = metal_shared.prefillStep;
 const modelContext = metal_shared.modelContext;
 const gibBytes = metal_shared.gibBytes;
 pub const backends: []const []const u8 = &.{"metal"};
+pub const metal4 = true;
 /// `tensorfold device`: the share of RAM the load limit grants (cache_fit's ceiling).
 pub const load_share_percent: u64 = cache_fit.SHARE_PERCENT;
 pub const serves: []const []const u8 = &.{ "--checkpoint-slots", "--spill-gib", "--mtp-drafts", "--mtp-confidence" };
@@ -68,7 +69,6 @@ pub const families: []const api.Family = &.{
     .{ .model_type = "flint", .formats = &.{"mlx-q4g64"} },
     .{ .model_type = "unlimited-ocr", .formats = &.{"bf16"} },
 };
-
 /// Gemma 4 31B (gemma4) and 12B (gemma4_unified, its text model): one native family, gemma4.zig's host.
 fn isGemma4(model_type: []const u8) bool {
     return std.mem.eql(u8, model_type, "gemma4") or std.mem.eql(u8, model_type, "gemma4_unified");

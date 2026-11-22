@@ -366,14 +366,12 @@ pub const Runner = struct {
     pub fn headPass(r: *Runner, round: *const Round, sc: *const @import("mtp.zig").Scratch, hidden: Ref, head: forward.Head) !Ref {
         return @import("mtp.zig").pass(r, round, sc, hidden, head);
     }
-
     /// The model's Metal 4 queue, unless the pass is a prompt chunk or needs Metal 3: a trace, the Neural Engine, seams
     fn passQueue(r: *const Runner, rows: usize) mtl.Queue {
         const c = r.model.metal4 orelse return r.model.queue;
-        if (!r.metal4 or rows > metal4_rows or c.broken or r.trace != null or r.model.ane != null or r.reduce != null) return r.model.queue;
-        return c.asQueue();
+        if (!r.metal4 or rows > metal4_rows or r.trace != null or r.model.ane != null or r.reduce != null) return r.model.queue;
+        return c;
     }
-
     pub fn keep(r: *Runner, round: *const Round, paths: []const []const u32) !void {
         const active = r.active orelse return error.RoundNotReady;
         if (r.failed or !std.mem.eql(u8, &active, &fingerprint(round))) return error.RoundNotReady;
