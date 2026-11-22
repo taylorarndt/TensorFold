@@ -18,6 +18,7 @@ pub const Taps = struct {
     /// Planes the buffer holds: the 27B's five until a drafter of more taps takes them (use).
     planes: usize = layers.len,
     rows: u32 = 0,
+    discard: bool = false, // only direct prefill chunks proved overwritten before its next reader
 
     pub fn init(device: mtl.Device, capacity: u32, width: u32) !Taps {
         if (capacity == 0 or capacity > @import("gpu_frame.zig").max_rows or width == 0) return error.BadTapShape;
@@ -57,8 +58,10 @@ pub const Taps = struct {
         if (t.seen != 0 and rows != t.rows) return error.BadTapShape;
         const bit = @as(u16, 1) << @intCast(index);
         if (t.seen & bit != 0) return error.DuplicateTap;
-        try glue.unstack(e, hidden, try t.plane(index), .{ .rows = rows, .width = t.width, .stride = t.width, .offset = 0 });
-        e.barrier();
+        if (!t.discard) {
+            try glue.unstack(e, hidden, try t.plane(index), .{ .rows = rows, .width = t.width, .stride = t.width, .offset = 0 });
+            e.barrier();
+        }
         t.seen |= bit;
         t.rows = rows;
     }

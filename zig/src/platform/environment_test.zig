@@ -433,7 +433,7 @@ test "environment: a legacy alias is checked only while its canonical name is un
 }
 
 test "environment: the Metal Qwen and slide-learning switches take their forms, read blank as unset and name a refusal" {
-    const flags = [_][:0]const u8{ "TF_QWEN27_SLOT_RESUME", "TF_QWEN27_SHARED_PREFIX", "TF_QWEN27_METAL_KV_PAGES", "TF_QWEN27_JOIN", "TF_QWEN35_METAL_KV_PAGES", "TF_SLIDE_TAKE_OUT_CHECK", "TF_SLIDE_TAP_CHECK" };
+    const flags = [_][:0]const u8{ "TF_Q27_DFLASH_TAP_LEAN", "TF_QWEN27_SLOT_RESUME", "TF_QWEN27_SHARED_PREFIX", "TF_QWEN27_METAL_KV_PAGES", "TF_QWEN27_JOIN", "TF_QWEN35_METAL_KV_PAGES", "TF_SLIDE_TAKE_OUT_CHECK", "TF_SLIDE_TAP_CHECK" };
     for (flags) |name| {
         try t.expectEqual(@as(?u64, 0), try e.parse(name, "0"));
         try t.expectEqual(@as(?u64, 1), try e.parse(name, "1"));
@@ -522,4 +522,16 @@ test "environment: Qwen host GiB cap is strict, bounded and blank as unset" {
     try t.expectEqual(@as(u64, 8), try e.value(u64, name, "8", 0));
     try t.expectEqual(@as(u64, std.math.maxInt(u64) >> 30), try e.value(u64, name, "17179869183", 0));
     for ([_][]const u8{ "0", "-1", "bad", "1.5", "17179869184" }) |raw| try t.expectError(error.InvalidEnvironment, e.value(u64, name, raw, 0));
+}
+
+test "tap lean environment: one registered Metal flag defaults off and exact forms are counted" {
+    var count: usize = 0;
+    for (e.rules) |rule| if (std.mem.eql(u8, rule.name, "TF_Q27_DFLASH_TAP_LEAN")) {
+        count += 1;
+        try t.expectEqual(e.Scope.metal, rule.scope);
+        try t.expectEqual(@TypeOf(e.rule("TF_Q27_DFLASH_TAP_LEAN").kind).flag, rule.kind);
+    };
+    try t.expectEqual(@as(usize, 1), count);
+    for ([_]?[]const u8{ null, "", " ", "0" }) |raw| try t.expect(!try e.value(bool, "TF_Q27_DFLASH_TAP_LEAN", raw, false));
+    try t.expect(try e.value(bool, "TF_Q27_DFLASH_TAP_LEAN", "1", false));
 }
