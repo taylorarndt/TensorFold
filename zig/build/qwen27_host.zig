@@ -12,6 +12,14 @@ pub fn tests(b: *std.Build, test_step: *std.Build.Step) void {
     b.step("test-qwen27-quant-host", "Prepared head cache identity and prompt row capacity without a GPU").dependOn(&quant_run.step);
     const metrics = b.createModule(.{ .root_source_file = b.path("zig/src/metal/pass_metrics.zig"), .target = b.graph.host });
     b.step("test-qwen27-pass-metrics-host", "Pass timing and forwarding allocator without a GPU").dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = metrics })).step);
+    const submission = b.createModule(.{ .root_source_file = b.path("zig/src/families/qwen27/submission.zig"), .target = b.graph.host });
+    const submission_step = b.step("test-qwen27-metal4-host", "Check Qwen27 queue selection and record Metal submission without shaders");
+    submission_step.dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = submission })).step);
+    if (b.graph.host.result.os.tag == .macos) {
+        const command = b.createModule(.{ .root_source_file = b.path("zig/src/metal/command.zig"), .target = b.graph.host, .link_libc = true });
+        command.linkSystemLibrary("objc", .{});
+        submission_step.dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = command, .filters = &.{"Metal submission:"} })).step);
+    }
     const mtp_flags = b.addRunArtifact(b.addTest(.{ .root_module = b.createModule(.{ .root_source_file = b.path("zig/src/native/qwen27_mtp_flags.zig"), .target = b.graph.host }) }));
     test_step.dependOn(&mtp_flags.step);
     b.step("test-qwen27-mtp-flags-host", "--mtp-drafts and --mtp-confidence refusals on a Mac without a GPU").dependOn(&mtp_flags.step);
