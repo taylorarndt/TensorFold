@@ -148,6 +148,7 @@ stops the start with the variable, the supplied text and the accepted forms.
 
 | Variable | Accepted explicit value |
 | --- | --- |
+| `TF_FLASHNEXT_HIP_TAIL_GRAPH` | Exactly `0` or `1`; default off. HIP tail graphs on one admitted stream and one rank, with the normal graph policy enabled. Keeps draw-result waits and protects staging reuse; device exactness and timing qualification remain required |
 | `TF_FLASHNEXT_PROMPT_BF16` | Exactly `0` or `1`; default on |
 | `TF_FLASHNEXT_WINDOW_GRAPH` | Exactly `0` or `1`; default on |
 | `TF_FLASHNEXT_LANE_PARTS` | Exactly `0` or `1`; default on |
