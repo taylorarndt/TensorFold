@@ -1,3 +1,6 @@
+#ifndef TF_METAL_SOFTMAX_IDENTITY_GUARD
+#define TF_METAL_SOFTMAX_IDENTITY_GUARD 1
+#endif
 // Prompt rows' attention in absolute 512-key chunks: a row's bits never depend on how its prompt was cut.
 #include <metal_stdlib>
 #include <MetalPerformancePrimitives/MetalPerformancePrimitives.h>
@@ -117,8 +120,9 @@ inline void q27_prompt_step(thread Q27PromptRun& r, int kt, int kend, const devi
   x0 = max(x0, simd_shuffle_xor(x0, 1)); x0 = max(x0, simd_shuffle_xor(x0, 8));
   x1 = max(x1, simd_shuffle_xor(x1, 1)); x1 = max(x1, simd_shuffle_xor(x1, 8));
   const float nm0 = max(r.m0, x0), nm1 = max(r.m1, x1);
-  const float f0 = (x0 == -INFINITY) ? 1.0f : fast::exp2(r.m0 - nm0);
-  const float f1 = (x1 == -INFINITY) ? 1.0f : fast::exp2(r.m1 - nm1);
+  const bool same0 = TF_METAL_SOFTMAX_IDENTITY_GUARD && nm0 == r.m0 && isfinite(r.m0), same1 = TF_METAL_SOFTMAX_IDENTITY_GUARD && nm1 == r.m1 && isfinite(r.m1);
+  const float f0 = (x0 == -INFINITY || same0) ? 1.0f : fast::exp2(r.m0 - nm0);
+  const float f1 = (x1 == -INFINITY || same1) ? 1.0f : fast::exp2(r.m1 - nm1);
   q27h8 p0, p1;
   float y0 = 0.0f, y1 = 0.0f;
   _Pragma("clang loop unroll(full)")
@@ -131,10 +135,10 @@ inline void q27_prompt_step(thread Q27PromptRun& r, int kt, int kend, const devi
   }
   y0 += simd_shuffle_xor(y0, 1); y0 += simd_shuffle_xor(y0, 8);
   y1 += simd_shuffle_xor(y1, 1); y1 += simd_shuffle_xor(y1, 8);
-  if (x0 != -INFINITY) { r.l0 = r.l0 * f0 + y0; r.m0 = nm0; }
-  if (x1 != -INFINITY) { r.l1 = r.l1 * f1 + y1; r.m1 = nm1; }
+  if (x0 != -INFINITY) { r.l0 = ((same0 && isfinite(r.l0)) ? r.l0 : r.l0 * f0) + y0; r.m0 = nm0; }
+  if (x1 != -INFINITY) { r.l1 = ((same1 && isfinite(r.l1)) ? r.l1 : r.l1 * f1) + y1; r.m1 = nm1; }
   _Pragma("clang loop unroll(full)")
-  for (int j = 0; j < 8; j++) for (int i = 0; i < 4; i++) { r.O[j][i] *= f0; r.O[j][4 + i] *= f1; }
+  for (int j = 0; j < 8; j++) for (int i = 0; i < 4; i++) { if (!same0 || !isfinite(r.O[j][i])) r.O[j][i] *= f0; if (!same1 || !isfinite(r.O[j][4 + i])) r.O[j][4 + i] *= f1; }
   _Pragma("clang loop unroll(full)")
   for (int j = 0; j < 8; j += 2) {
     q27_mma_o(r.O[j], r.O[j + 1], p0, q27_vfrag<EDGE, MASKED>(v + kt * PD + j * 16, fm, fn, kt, kend, mask), q27_vfrag<EDGE, MASKED>(v + kt * PD + (j + 1) * 16, fm, fn, kt, kend, mask));
@@ -228,9 +232,10 @@ kernel void q27_attn_prompt_merge(device const float* PO [[buffer(0)]], device c
     if (mc == -INFINITY) continue;
     const float lc = PL[row];
     const float nm = max(m, mc);
-    const float f1 = fast::exp2(m - nm), f2 = fast::exp2(mc - nm);
-    l = l * f1 + lc * f2;
-    for (int i = 0; i < DP; i++) o[i] = o[i] * f1 + PO[row * PD + lane * DP + i] * f2;
+    const bool same1 = TF_METAL_SOFTMAX_IDENTITY_GUARD && nm == m && isfinite(m), same2 = TF_METAL_SOFTMAX_IDENTITY_GUARD && nm == mc && isfinite(mc);
+    const float f1 = same1 ? 1.0f : fast::exp2(m - nm), f2 = same2 ? 1.0f : fast::exp2(mc - nm);
+    l = ((same1 && isfinite(l)) ? l : l * f1) + ((same2 && isfinite(lc)) ? lc : lc * f2);
+    for (int i = 0; i < DP; i++) o[i] = ((same1 && isfinite(o[i])) ? o[i] : o[i] * f1) + ((same2 && isfinite(PO[row * PD + lane * DP + i])) ? PO[row * PD + lane * DP + i] : PO[row * PD + lane * DP + i] * f2);
     m = nm;
   }
   const int node = r / PG, head = hk * PG + r % PG;
@@ -252,9 +257,10 @@ kernel void q27_attn_prompt_merge_single(device const float* PO [[buffer(0)]], d
     if (mc == -INFINITY) continue;
     const float lc = PL[row];
     const float nm = max(m, mc);
-    const float f1 = fast::exp2(m - nm), f2 = fast::exp2(mc - nm);
-    l = l * f1 + lc * f2;
-    for (int i = 0; i < DP; i++) o[i] = o[i] * f1 + PO[row * PD + lane * DP + i] * f2;
+    const bool same1 = TF_METAL_SOFTMAX_IDENTITY_GUARD && nm == m && isfinite(m), same2 = TF_METAL_SOFTMAX_IDENTITY_GUARD && nm == mc && isfinite(mc);
+    const float f1 = same1 ? 1.0f : fast::exp2(m - nm), f2 = same2 ? 1.0f : fast::exp2(mc - nm);
+    l = ((same1 && isfinite(l)) ? l : l * f1) + ((same2 && isfinite(lc)) ? lc : lc * f2);
+    for (int i = 0; i < DP; i++) o[i] = ((same1 && isfinite(o[i])) ? o[i] : o[i] * f1) + ((same2 && isfinite(PO[row * PD + lane * DP + i])) ? PO[row * PD + lane * DP + i] : PO[row * PD + lane * DP + i] * f2);
     m = nm;
   }
   const int node = r / PG, head = hk * PG + r % PG;

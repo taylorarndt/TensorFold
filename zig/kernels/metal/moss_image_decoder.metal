@@ -1,3 +1,6 @@
+#ifndef TF_METAL_SOFTMAX_IDENTITY_GUARD
+#define TF_METAL_SOFTMAX_IDENTITY_GUARD 1
+#endif
 // MOSS-Image's image decoder (FLUX.2's VAE decoder) in fp32, each picture tensor [rows, columns, channels].
 
 #include <metal_stdlib>
@@ -360,17 +363,18 @@ struct MdAttention {
     }
     TF_UNROLL_MD
     for (ushort m = 1; m < 16; m <<= 1) most = max(most, simd_shuffle_xor(most, m));
-    const float alpha = precise::exp(best - most);
+    const bool same = TF_METAL_SOFTMAX_IDENTITY_GUARD && most == best && isfinite(best);
+    const float alpha = same ? 1.0f : precise::exp(best - most);
     float add = 0.0f;
-    TF_UNROLL_MD
+    TF_UNROLL_IV
     for (uint c = 0; c < 2; c++) {
       const float e = precise::exp(v[c] - most);
       Ps[row * BK + col + c] = e;
       add += e;
     }
-    TF_UNROLL_MD
+    TF_UNROLL_IV
     for (ushort m = 1; m < 16; m <<= 1) add += simd_shuffle_xor(add, m);
-    total = total * alpha + add;
+    total = ((same && isfinite(total)) ? total : total * alpha) + add;
     best = most;
     if (t % 16 == 0) As[row] = alpha;
     if (t == 0) rescale = 0;

@@ -1,3 +1,6 @@
+#ifndef TF_METAL_SOFTMAX_IDENTITY_GUARD
+#define TF_METAL_SOFTMAX_IDENTITY_GUARD 1
+#endif
 #include <metal_stdlib>
 using namespace metal;
 typedef bfloat bfloat16_t;
@@ -220,9 +223,10 @@ inline float qgroup_doth(const device uint32_t* w, float scale, float bias, cons
     for (int i = 0; i < PER; i++) sc = fma(q[i], float(kb[key + i]), sc);
     sc = simd_sum(sc);
     const float mn = metal::max(m, sc);
-    const float f = metal::exp(m - mn), e = metal::exp(sc - mn);
-    l = fma(l, f, e);
-    for (int i = 0; i < PER; i++) o[i] = fma(e, float(vb[key + i]), o[i] * f);
+    const bool same = TF_METAL_SOFTMAX_IDENTITY_GUARD && mn == m && isfinite(m);
+    const float f = same ? 1.0f : metal::exp(m - mn), e = metal::exp(sc - mn);
+    l = (same && isfinite(l + e)) ? l + e : fma(l, f, e);
+    for (int i = 0; i < PER; i++) o[i] = fma(e, float(vb[key + i]), (same && isfinite(o[i])) ? o[i] : o[i] * f);
     m = mn;
   }
   threadgroup float ms[8], ls[8];
@@ -231,8 +235,9 @@ inline float qgroup_doth(const device uint32_t* w, float scale, float bias, cons
   threadgroup_barrier(mem_flags::mem_threadgroup);
   float top = -INFINITY;
   for (int k = 0; k < 8; k++) top = metal::max(top, ms[k]);
-  const float mine = m == -INFINITY ? 0.0f : metal::exp(m - top);
-  for (int i = 0; i < PER; i++) tile[g][lane * PER + i] = o[i] * mine;
+  const bool same = TF_METAL_SOFTMAX_IDENTITY_GUARD && m == top && isfinite(m);
+  const float mine = m == -INFINITY ? 0.0f : (same ? 1.0f : metal::exp(m - top));
+  for (int i = 0; i < PER; i++) tile[g][lane * PER + i] = (same && isfinite(o[i])) ? o[i] : o[i] * mine;
   threadgroup_barrier(mem_flags::mem_threadgroup);
   const size_t at = (size_t(r) * H + h) * P + part;
   for (int d = int(thread_position_in_threadgroup.x); d < D; d += 256) {
@@ -242,7 +247,7 @@ inline float qgroup_doth(const device uint32_t* w, float scale, float bias, cons
   }
   if (thread_position_in_threadgroup.x == 0) {
     float total = 0.0f;
-    for (int k = 0; k < 8; k++) total += ms[k] == -INFINITY ? 0.0f : ls[k] * metal::exp(ms[k] - top);
+    for (int k = 0; k < 8; k++) total += ms[k] == -INFINITY ? 0.0f : (TF_METAL_SOFTMAX_IDENTITY_GUARD && ms[k] == top && isfinite(ms[k]) && isfinite(ls[k]) ? ls[k] : ls[k] * metal::exp(ms[k] - top));
     PM[at * 2] = top;
     PM[at * 2 + 1] = total;
   }

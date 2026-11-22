@@ -23,7 +23,7 @@ const controls = [_]Control{
     .{ .kernel = "dn_scale_add", .what = "drops bf16(g y)", .edits = &.{.{ .from = "x[i] = bfloat(float(x[i]) + dn_b(float(g[at.x]) * float(y[i])));", .to = "x[i] = bfloat(float(x[i]) + (float(g[at.x]) * float(y[i])));" }} },
     .{ .kernel = "dn_swiglu", .what = "drops bf16(silu(g))", .edits = &.{.{ .from = "bfloat(dn_b(g / (1.0f + metal::precise::exp(-g))) * float(gu[i + width]));", .to = "bfloat((g / (1.0f + metal::precise::exp(-g))) * float(gu[i + width]));" }} },
     .{ .kernel = "dn_attention", .what = "keys past Lk unmasked", .edits = &.{.{ .from = "s[f][e] = (16 * f + home.x + TF_COL(e)) < k_rows ? s[f][e] : kDnMasked;", .to = "s[f][e] = s[f][e];" }} },
-    .{ .kernel = "dn_attention", .what = "rounds the P V sums to bf16 each key block", .gate = .sums, .edits = &.{.{ .from = "for (short e = 0; e < 8; e++) acc[i][e] = acc[i][e] * scale_old[e >> 2];", .to = "for (short e = 0; e < 8; e++) acc[i][e] = float(bfloat(acc[i][e] * scale_old[e >> 2]));" }} },
+    .{ .kernel = "dn_attention", .what = "rounds the P V sums to bf16 each key block", .gate = .sums, .edits = &.{.{ .from = "for (short e = 0; e < 8; e++) if (!same[e >> 2]) acc[i][e] = acc[i][e] * scale_old[e >> 2];", .to = "for (short e = 0; e < 8; e++) if (!same[e >> 2]) acc[i][e] = float(bfloat(acc[i][e] * scale_old[e >> 2]));" }} },
 };
 
 /// A test the suite made, and how it goes.

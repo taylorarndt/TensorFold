@@ -1,3 +1,6 @@
+#ifndef TF_METAL_SOFTMAX_IDENTITY_GUARD
+#define TF_METAL_SOFTMAX_IDENTITY_GUARD 1
+#endif
 // Step-5's prompt attention on the tensor units: a KV group's 16 query heads are one operand over each row's keys.
 #include <metal_stdlib>
 using namespace metal;
@@ -13,13 +16,8 @@ struct s5_sparse_args {
   float eps, theta, scale;
 };
 
-#ifndef TF_SIMD_FRAGS
 inline short t_key(short e, short2 home) { return home.y + (e >> 2) * 8; }
 inline short t_dim(short e, short2 home) { return home.x + (e & 3); }
-#else
-inline short t_key(short e, short2 home) { return home.x + TF_COL(e); }
-inline short t_dim(short e, short2 home) { return home.y + (e >> 2) * 8; }
-#endif
 inline short p_row(short e, short2 home) { return home.y + (e >> 2) * 8; }
 inline short p_col(short e, short2 home) { return home.x + TF_COL(e); }
 
@@ -77,7 +75,6 @@ inline float row_sum(float v) {
     }
     threadgroup_barrier(mem_flags::mem_threadgroup);
     frag<float> lo_s = frag<float>(0), hi_s = frag<float>(0);
-#ifndef TF_SIMD_FRAGS
     const device bfloat* kr[4];
     TF_UNROLL
     for (short i = 0; i < 4; i++) kr[i] = kg + long(max(keyrow[8 * i + home.y], 0)) * ld + home.x;
@@ -87,20 +84,6 @@ inline float row_sum(float v) {
       const frag<bfloat> b1 = frag<bfloat>(*(const device bfloat4*)(kr[2] + 16 * t), *(const device bfloat4*)(kr[3] + 16 * t));
       mma_16x32<false, true>(lo_s, hi_s, q[t], b0, b1);
     }
-#else
-    TF_UNROLL
-    for (short t = 0; t < 4; t++) {
-      frag<bfloat> b0, b1;
-      TF_UNROLL
-      for (short e = 0; e < 8; e++) {
-        const int k0 = keyrow[t_key(e, home)], k1 = keyrow[16 + t_key(e, home)];
-        const int d = 16 * t + t_dim(e, home);
-        b0[e] = kg[long(max(k0, 0)) * ld + d];
-        b1[e] = kg[long(max(k1, 0)) * ld + d];
-      }
-      mma_16x32<false, true>(lo_s, hi_s, q[t], b0, b1);
-    }
-#endif
     TF_UNROLL
     for (short e = 0; e < 8; e++) {
       partial[s][lane][e] = lo_s[e];
@@ -121,7 +104,7 @@ inline float row_sum(float v) {
       TF_UNROLL
       for (short i = 0; i < 4; i++) bmax = max(bmax, max(sc[4 * h + i], sc[8 + 4 * h + i]));
       const float new_max = max(m[h], row_max(bmax));
-      factor[h] = precise::exp(m[h] - new_max);
+      factor[h] = TF_METAL_SOFTMAX_IDENTITY_GUARD && new_max == m[h] && isfinite(m[h]) ? 1.0f : precise::exp(m[h] - new_max);
       m[h] = new_max;
     }
     frag<bfloat> p1[2], p2[2], p3[2]; // keys 0-15 and 16-31: the probabilities' three bf16 parts
@@ -139,36 +122,24 @@ inline float row_sum(float v) {
       p3[kb][e] = bfloat(r1 - float(y));
     }
     TF_UNROLL
-    for (short h = 0; h < 2; h++) l[h] = l[h] * factor[h] + row_sum(bsum[h]);
+    for (short h = 0; h < 2; h++) l[h] = (factor[h] == 1.0f ? l[h] : l[h] * factor[h]) + row_sum(bsum[h]);
     TF_UNROLL
     for (short c = 0; c < 2; c++) {
       TF_UNROLL
       for (short e = 0; e < 8; e++) {
-        acc[c][0][e] *= factor[e >> 2];
-        acc[c][1][e] *= factor[e >> 2];
+        if (factor[e >> 2] != 1.0f) acc[c][0][e] *= factor[e >> 2];
+        if (factor[e >> 2] != 1.0f) acc[c][1][e] *= factor[e >> 2];
       }
     }
     TF_UNROLL
     for (short kb = 0; kb < 2; kb++) {
-#ifndef TF_SIMD_FRAGS
       const device bfloat* va = vg + long(max(keyrow[16 * kb + home.y], 0)) * ld + home.x;
       const device bfloat* vb = vg + long(max(keyrow[16 * kb + home.y + 8], 0)) * ld + home.x;
-#endif
       TF_UNROLL
       for (short c = 0; c < 2; c++) {
         frag<bfloat> v0, v1;
-#ifndef TF_SIMD_FRAGS
         v0 = frag<bfloat>(*(const device bfloat4*)(va + 32 * c), *(const device bfloat4*)(vb + 32 * c));
         v1 = frag<bfloat>(*(const device bfloat4*)(va + 32 * c + 16), *(const device bfloat4*)(vb + 32 * c + 16));
-#else
-        TF_UNROLL
-        for (short e = 0; e < 8; e++) {
-          const int k = max(keyrow[16 * kb + p_row(e, home)], 0);
-          const int d = 32 * c + p_col(e, home);
-          v0[e] = vg[long(k) * ld + d];
-          v1[e] = vg[long(k) * ld + d + 16];
-        }
-#endif
         mma_16x32<false, false>(acc[c][0], acc[c][1], p1[kb], v0, v1);
         mma_16x32<false, false>(acc[c][0], acc[c][1], p2[kb], v0, v1);
         mma_16x32<false, false>(acc[c][0], acc[c][1], p3[kb], v0, v1);

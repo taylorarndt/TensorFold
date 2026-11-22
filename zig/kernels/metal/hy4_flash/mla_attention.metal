@@ -1,3 +1,6 @@
+#ifndef TF_METAL_SOFTMAX_IDENTITY_GUARD
+#define TF_METAL_SOFTMAX_IDENTITY_GUARD 1
+#endif
 // Absorbed MLA using physical BF16 KV slots and rank-local attention sinks.
 #include <metal_stdlib>
 using namespace metal;
@@ -50,9 +53,10 @@ kernel void tf_hy4_attend_chunks(
         dot = fma(q1, hy4_float(k[rope_col + 1]), dot);
         for (ushort d = 16; d > 0; d >>= 1) dot += simd_shuffle_xor(dot, d);
         const float score = dot * scale, next = max(top, score);
-        const float old = precise::exp(top - next), p = precise::exp(score - next);
-        denom = fma(denom, old, p);
-        for (uint i = 0; i < 16; ++i) accum[i] = fma(p, kv[i], accum[i] * old);
+        const bool same = TF_METAL_SOFTMAX_IDENTITY_GUARD && next == top && isfinite(top);
+        const float old = same ? 1.0f : precise::exp(top - next), p = precise::exp(score - next);
+        denom = (same && isfinite(denom + p)) ? denom + p : fma(denom, old, p);
+        for (uint i = 0; i < 16; ++i) accum[i] = fma(p, kv[i], (same && isfinite(accum[i])) ? accum[i] : accum[i] * old);
         top = next;
     }
     if (lane == 0) {
@@ -78,9 +82,10 @@ kernel void tf_hy4_attend_merge(
     float denom = precise::exp(sinks[head] - top), acc[4] = {};
     for (uint i = 0; i < shape.chunks; ++i) {
         const device float *part = base + i * step;
-        const float p = precise::exp(part[lat] - top);
-        denom = fma(part[lat + 1], p, denom);
-        for (uint j = 0; j < 4; ++j) acc[j] = fma(part[column + j], p, acc[j]);
+        const bool same = TF_METAL_SOFTMAX_IDENTITY_GUARD && part[lat] == top && isfinite(part[lat]);
+        const float p = same ? 1.0f : precise::exp(part[lat] - top);
+        denom = (same && isfinite(part[lat + 1] + denom)) ? part[lat + 1] + denom : fma(part[lat + 1], p, denom);
+        for (int j = 0; j < 4; ++j) acc[j] = (same && isfinite(part[column + j] + acc[j])) ? part[column + j] + acc[j] : fma(part[column + j], p, acc[j]);
     }
     for (uint j = 0; j < 4; ++j) output[row_head * lat + column + j] = hy4_bf16(precise::divide(acc[j], denom));
 }
@@ -154,7 +159,8 @@ kernel void tf_hy4_attend_scored(
         const float next = max(top, m);
         float before = simd_shuffle_up(next, 1);
         if (lane == 0) before = top;
-        const float old = precise::exp(before - next), p = precise::exp(score - next);
+        const bool same = TF_METAL_SOFTMAX_IDENTITY_GUARD && next == before && isfinite(before);
+        const float old = same ? 1.0f : precise::exp(before - next), p = precise::exp(score - next);
         for (uint h = 0; h < n; h += 16) {
             const uint tn = min(16u, n - h);
             threadgroup_barrier(mem_flags::mem_threadgroup);
@@ -167,8 +173,9 @@ kernel void tf_hy4_attend_scored(
                 for (uint t = 0; t < tn; ++t) {
                     const threadgroup ushort *kv_row = (const threadgroup ushort *)&tile[t][0];
                     const float pt = simd_shuffle(p, ushort(h + t)), ot = simd_shuffle(old, ushort(h + t));
-                    denom = fma(denom, ot, pt);
-                    for (uint i = 0; i < 16; ++i) accum[i] = fma(pt, hy4_float(kv_row[latent_col + i]), accum[i] * ot);
+                    const bool st = ot == 1.0f;
+                    denom = st ? denom + pt : fma(denom, ot, pt);
+                    for (uint i = 0; i < 16; ++i) accum[i] = fma(pt, hy4_float(kv_row[latent_col + i]), st ? accum[i] : accum[i] * ot);
                 }
             }
         }

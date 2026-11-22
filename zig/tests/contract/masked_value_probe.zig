@@ -48,7 +48,8 @@ pub fn Types(comptime B: type) type {
             }
             pub fn kernel(p: *Probe) g.Kernel {
                 const name = std.fmt.bufPrint(&p.label, "{s}metal masked-V {s} {s} {s}", .{ if (p.control == .none) "" else "control: ", B.label(p.kind), @tagName(p.poison), if (p.control == .none) "" else @tagName(p.control) }) catch unreachable;
-                return .{ .ctx = p, .vt = &vt, .control = if (p.control == .none) null else .nonfinite, .spec = .{
+                const identity_supported = if (@hasDecl(B, "identitySupported")) B.identitySupported(p.kind) else true;
+                return .{ .ctx = p, .vt = &vt, .control = if (p.control == .none) null else .nonfinite, .adversarial = p.control == .none and identity_supported, .spec = .{
                     .name = name,
                     .accum = .f32,
                     .depth = depth,
@@ -62,7 +63,7 @@ pub fn Types(comptime B: type) type {
                 } };
             }
             const vt = g.hooks(Probe);
-            pub fn prepare(p: *Probe, shape: c.Shape, fill: g.Fill, _: u64) !bool {
+            pub fn prepare(p: *Probe, shape: c.Shape, fill: g.Fill, seed: u64) !bool {
                 if (shape.rows == 0 or shape.rows > 32 or shape.n != p.geo.heads * p.geo.dim or (p.geo.ring == 0 and shape.k + shape.rows > p.geo.cap)) return false;
                 p.rig.reset();
                 if (p.arena) |*a| a.deinit();
@@ -71,6 +72,7 @@ pub fn Types(comptime B: type) type {
                 var geo = p.geo;
                 geo.first = shape.k;
                 p.fixture = try data.Data.init(p.arena.?.allocator(), geo, shape.rows, fill == .nonfinite, p.poison);
+                if (ct.identity.requested(seed)) p.fixture.plantIdentity();
                 try B.prepare(p);
                 return true;
             }
@@ -136,8 +138,8 @@ pub fn Types(comptime B: type) type {
             kernels: *std.ArrayList(g.Kernel),
             probes: std.ArrayList(*Probe) = .empty,
             pub fn collect(s: *Suite, only: ?[]const u8) !void {
-                if (!s.device.tensorUnits()) return;
                 for (std.enums.values(B.Kind)) |kind| {
+                    if (@hasDecl(B, "portable") and !s.device.tensorUnits() and !B.portable(kind)) continue;
                     if (!B.available(kind)) {
                         std.debug.print("MASKED_UNAVAILABLE {s}: source absent from this tree\n", .{B.label(kind)});
                         continue;

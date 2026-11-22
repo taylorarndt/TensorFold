@@ -1,3 +1,6 @@
+#ifndef TF_METAL_SOFTMAX_IDENTITY_GUARD
+#define TF_METAL_SOFTMAX_IDENTITY_GUARD 1
+#endif
 // Step-5's sparse indexer and attention, as StepFun's kernel.py (rev 364b3b03) computes them.
 #include <metal_stdlib>
 using namespace metal;
@@ -249,7 +252,7 @@ inline uint s5_key_at(uint i, bool listed, uint lo, const device int* picks, uin
     for (uint j = 0; j < 4; ++j) {
       if (!live[j]) continue;
       const float next = max(maximum, score[j]);
-      const float old = maximum == -INFINITY ? 0.0f : precise::exp(maximum - next);
+      const float old = maximum == -INFINITY ? 0.0f : (TF_METAL_SOFTMAX_IDENTITY_GUARD && next == maximum && isfinite(maximum) ? 1.0f : precise::exp(maximum - next));
       const float weight = precise::exp(score[j] - next);
       maximum = next;
       total = fma(total, old, weight);
@@ -267,7 +270,7 @@ inline uint s5_key_at(uint i, bool listed, uint lo, const device int* picks, uin
   for (uint d = 0; d < per; ++d) acc[d] = 0.0f;
   for (uint s = 0; s < 8; ++s) {
     if (t_part[s] == 0.0f) continue;
-    const float w = precise::exp(m_part[s] - m);
+    const float w = TF_METAL_SOFTMAX_IDENTITY_GUARD && m_part[s] == m && isfinite(m_part[s]) ? 1.0f : precise::exp(m_part[s] - m);
     sum = fma(t_part[s], w, sum);
     for (uint d = 0; d < per; ++d) acc[d] = fma(o_part[s][lane + 32 * d], w, acc[d]);
   }

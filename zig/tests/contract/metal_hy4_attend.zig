@@ -34,8 +34,8 @@ fn control(f: Fault) Control {
     return switch (f) {
         .drop_last => .{ .edit = .{ .kernel = "tf_hy4_attend_chunks", .from = "counts[row]);", .to = "counts[row] - 1);" }, .gate = .shapes, .what = "each row's last key dropped", .word = "drop-last" },
         .no_sink => .{ .edit = .{ .kernel = "tf_hy4_attend_merge", .from = "float denom = precise::exp(sinks[head] - top)", .to = "float denom = 0.0f" }, .gate = .shapes, .what = "the sink dropped from the merge's denominator", .word = "no-sink" },
-        .half_sums => .{ .edit = .{ .kernel = "tf_hy4_attend_chunks", .from = "accum[i] = fma(p, kv[i], accum[i] * old);", .to = "accum[i] = float(half(fma(p, kv[i], accum[i] * old)));" }, .gate = .sums, .what = "each chunk's values summed in half", .word = "half-sums" },
-        .skip_nan => .{ .edit = .{ .kernel = "tf_hy4_attend_merge", .from = "const float p = precise::exp(part[lat] - top);", .to = "if (isnan(part[lat + 1])) continue;\n        const float p = precise::exp(part[lat] - top);" }, .gate = .nonfinite, .what = "the merge skipping a chunk whose mass is NaN", .word = "skip-nan" },
+        .half_sums => .{ .edit = .{ .kernel = "tf_hy4_attend_chunks", .from = "accum[i] = fma(p, kv[i], same ? accum[i] : accum[i] * old);", .to = "accum[i] = float(half(fma(p, kv[i], same ? accum[i] : accum[i] * old)));" }, .gate = .sums, .what = "each chunk's values summed in half", .word = "half-sums" },
+        .skip_nan => .{ .edit = .{ .kernel = "tf_hy4_attend_merge", .from = "const float p = same ? 1.0f : precise::exp(part[lat] - top);", .to = "if (isnan(part[lat + 1])) continue;\n        const float p = same ? 1.0f : precise::exp(part[lat] - top);" }, .gate = .nonfinite, .what = "the merge skipping a chunk whose mass is NaN", .word = "skip-nan" },
         .shuffle => .{ .edit = .{ .kernel = "tf_hy4_attend_scored", .from = "simd_shuffle(p, ushort(h + t))", .to = "simd_shuffle(p, ushort(t))" }, .gate = .shapes, .what = "each 32-key step's last 16 keys weighed as its first 16", .word = "shuffle" },
     };
 }

@@ -1,3 +1,6 @@
+#ifndef TF_METAL_SOFTMAX_IDENTITY_GUARD
+#define TF_METAL_SOFTMAX_IDENTITY_GUARD 1
+#endif
 // MiniMax-M3.1-Flash's glue at transformers' rounding points (modeling_minimax_m3_vl.py, bf16 activations).
 #include <metal_stdlib>
 using namespace metal;
@@ -490,9 +493,9 @@ struct mm_vec_args { uint rows, pos, heads, groups, topk; float scale; uint sel,
       score[u] = live ? sc : -INFINITY;
     }
     const float peak = max(max(top, max(score[0], score[1])), max(score[2], score[3]));
-    const float rescale = fast::exp(top - peak);
-    mass *= rescale;
-    acc *= rescale;
+    const bool same = TF_METAL_SOFTMAX_IDENTITY_GUARD && peak == top && isfinite(top);
+    const float rescale = same ? 1.0f : fast::exp(top - peak);
+    if (!same || !isfinite(mass) || !all(isfinite(acc))) { mass *= rescale; acc *= rescale; }
     TF_UNROLL_4
     for (uint u = 0; u < 4; ++u) {
       const float w = fast::exp(score[u] - peak);
@@ -520,9 +523,10 @@ struct mm_vec_args { uint rows, pos, heads, groups, topk; float scale; uint sel,
   float4 acc = 0.0f;
   for (uint b = 0; b < a.topk; ++b) {
     if (ls[b] <= 0.0f) continue;
-    const float f = fast::exp(ms[b] - top);
-    total += ls[b] * f;
-    acc += f * *(const device float4*)(PO + (at * a.topk + b) * 128 + 4 * lane);
+    const bool same = TF_METAL_SOFTMAX_IDENTITY_GUARD && ms[b] == top && isfinite(ms[b]);
+    const float f = same ? 1.0f : fast::exp(ms[b] - top);
+    total += (same && isfinite(ls[b])) ? ls[b] : ls[b] * f;
+    acc += (same && all(isfinite(*(const device float4*)(PO + (at * a.topk + b) * 128 + 4 * lane)))) ? *(const device float4*)(PO + (at * a.topk + b) * 128 + 4 * lane) : f * *(const device float4*)(PO + (at * a.topk + b) * 128 + 4 * lane);
   }
   acc /= total;
   *(device bfloat4*)(O + (row * a.heads + head) * 128 + 4 * lane) = bfloat4(acc);

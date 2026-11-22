@@ -1,3 +1,6 @@
+#ifndef TF_METAL_SOFTMAX_IDENTITY_GUARD
+#define TF_METAL_SOFTMAX_IDENTITY_GUARD 1
+#endif
 // Qwen3.5-2B's keys and attention over core-pool pages: the contiguous kernels with only the K/V address changed.
 
 kernel void qwen35_keys_paged(const device bfloat* k [[buffer(0)]],
@@ -77,9 +80,10 @@ static_assert(TF_PAGE_TOKENS % CK == 0, "a chunk of keys must sit inside one pag
         if (rows[j] >= 0) bm = metal::max(bm, sc[j]);
       }
       const float mn = metal::max(m, bm);
-      const float a = metal::exp(m - mn);
-      l *= a;
-      for (int i = 0; i < DPL; i++) o[i] *= a;
+      const bool same = TF_METAL_SOFTMAX_IDENTITY_GUARD && mn == m && isfinite(m);
+      const float a = same ? 1.0f : metal::exp(m - mn);
+      if (!same || !isfinite(l)) l *= a;
+      for (int i = 0; i < DPL; i++) if (!same || !isfinite(o[i])) o[i] *= a;
       for (int j = 0; j < BLK; j++) {
         if (rows[j] < 0) continue;
         const float b = metal::exp(sc[j] - mn);
@@ -99,9 +103,10 @@ static_assert(TF_PAGE_TOKENS % CK == 0, "a chunk of keys must sit inside one pag
       float lsum = 0.0f, acc[DPL];
       for (int i = 0; i < DPL; i++) acc[i] = 0.0f;
       for (int t = 0; t < SPLIT; t++) {
-        const float e = sl[g * SPLIT + t] > 0.0f ? metal::exp(sm[g * SPLIT + t] - mx_) : 0.0f;
-        lsum = fma(sl[g * SPLIT + t], e, lsum);
-        for (int i = 0; i < DPL; i++) acc[i] = fma(so[g * SPLIT + t][int(lane) * DPL + i], e, acc[i]);
+        const bool same = sl[g * SPLIT + t] > 0.0f && TF_METAL_SOFTMAX_IDENTITY_GUARD && sm[g * SPLIT + t] == mx_ && isfinite(sm[g * SPLIT + t]);
+        const float e = sl[g * SPLIT + t] > 0.0f ? (same ? 1.0f : metal::exp(sm[g * SPLIT + t] - mx_)) : 0.0f;
+        lsum = (same && isfinite(sl[g * SPLIT + t] + lsum)) ? sl[g * SPLIT + t] + lsum : fma(sl[g * SPLIT + t], e, lsum);
+        for (int i = 0; i < DPL; i++) acc[i] = (same && isfinite(so[g * SPLIT + t][int(lane) * DPL + i] + acc[i])) ? so[g * SPLIT + t][int(lane) * DPL + i] + acc[i] : fma(so[g * SPLIT + t][int(lane) * DPL + i], e, acc[i]);
       }
       const int slot = (qh * W + w) * NCH + c;
       if (lane == 0) { PM[slot] = mx_; PL[slot] = lsum; }

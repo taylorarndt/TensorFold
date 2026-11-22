@@ -1,3 +1,6 @@
+#ifndef TF_METAL_SOFTMAX_IDENTITY_GUARD
+#define TF_METAL_SOFTMAX_IDENTITY_GUARD 1
+#endif
 // LFM2-MoE's kernels beside the core row projections: every row's arithmetic is its own, whatever the rows beside it.
 #include <metal_stdlib>
 using namespace metal;
@@ -187,9 +190,10 @@ inline void lfm2_merge(thread float& M, thread float& L, float m, float l, threa
     return;
   }
   const float M2 = max(M, m);
-  alpha = M == -INFINITY ? 0.0f : metal::fast::exp(M - M2);
-  beta = metal::fast::exp(m - M2);
-  L = fma(L, alpha, l * beta);
+  const bool same = TF_METAL_SOFTMAX_IDENTITY_GUARD && M2 == M && isfinite(M), incoming = TF_METAL_SOFTMAX_IDENTITY_GUARD && M2 == m && isfinite(m);
+  alpha = M == -INFINITY ? 0.0f : (same ? 1.0f : metal::fast::exp(M - M2));
+  beta = incoming ? 1.0f : metal::fast::exp(m - M2);
+  L = (same && isfinite(L + ((incoming && isfinite(l)) ? l : l * beta))) ? L + ((incoming && isfinite(l)) ? l : l * beta) : fma(L, alpha, (incoming && isfinite(l)) ? l : l * beta);
   M = M2;
 }
 
@@ -309,12 +313,12 @@ inline void lfm2_attn_rows(const device bfloat* queries, const device bfloat* ke
           bsum[t] = bs;
           pb[b][t] = vec<bfloat, 2>(bfloat(p0), bfloat(p1));
         }
-        alpha[b] = live ? metal::fast::exp(m[b] - m2) : 1.0f;
-        l[b] = fma(l[b], alpha[b], (bsum[0] + bsum[1]) + (bsum[2] + bsum[3]));
+        alpha[b] = live ? (TF_METAL_SOFTMAX_IDENTITY_GUARD && m2 == m[b] && isfinite(m[b]) ? 1.0f : metal::fast::exp(m[b] - m2)) : 1.0f;
+        l[b] = TF_METAL_SOFTMAX_IDENTITY_GUARD && alpha[b] == 1.0f && isfinite(l[b] + ((bsum[0] + bsum[1]) + (bsum[2] + bsum[3]))) ? l[b] + ((bsum[0] + bsum[1]) + (bsum[2] + bsum[3])) : fma(l[b], alpha[b], (bsum[0] + bsum[1]) + (bsum[2] + bsum[3]));
         m[b] = m2;
       }
       for (int d = 0; d < 8; ++d) {
-        for (int b = 0; b < RB; ++b) o[b][d] *= alpha[b];
+        for (int b = 0; b < RB; ++b) if (alpha[b] != 1.0f || !isfinite(o[b][d])) o[b][d] *= alpha[b];
         for (uint t = 0; t < 4; ++t) {
           const vec<bfloat, 2> v = *(const threadgroup vec<bfloat, 2>*)(vsb + (8 * t + fm) * KP + 8 * d + fn);
           for (int b = 0; b < RB; ++b) o[b][d] = lfm2_mma(o[b][d], pb[b][t], v);
@@ -326,7 +330,10 @@ inline void lfm2_attn_rows(const device bfloat* queries, const device bfloat* ke
     for (int b = 0; b < RB; ++b) {
       float alpha, beta;
       lfm2_merge(M[b], L[b], m[b], l[b], alpha, beta);
-      for (int d = 0; d < 8; ++d) O[b][d] = fma(O[b][d], alpha, o[b][d] * beta);
+      for (int d = 0; d < 8; ++d) {
+        const float incoming = (TF_METAL_SOFTMAX_IDENTITY_GUARD && M[b] == m[b] && isfinite(m[b]) && isfinite(o[b][d])) ? o[b][d] : o[b][d] * beta;
+        O[b][d] = (TF_METAL_SOFTMAX_IDENTITY_GUARD && alpha == 1.0f && isfinite(O[b][d] + incoming)) ? O[b][d] + incoming : fma(O[b][d], alpha, incoming);
+      }
     }
   }
   for (int b = 0; b < RB; ++b) {
@@ -370,8 +377,10 @@ inline void lfm2_merge_row(const device float* pm, const device float* pl, const
       const size_t i = at + c * p.subs + s;
       float alpha, beta;
       lfm2_merge(M, L, pm[i], pl[i], alpha, beta);
-      O0 = fma(O0, alpha, po[i * HD + lane] * beta);
-      O1 = fma(O1, alpha, po[i * HD + lane + 32] * beta);
+      const float incoming = (TF_METAL_SOFTMAX_IDENTITY_GUARD && M == pm[i] && isfinite(pm[i]) && isfinite(po[i * HD + lane])) ? po[i * HD + lane] : po[i * HD + lane] * beta;
+      O0 = (TF_METAL_SOFTMAX_IDENTITY_GUARD && alpha == 1.0f && isfinite(O0 + incoming)) ? O0 + incoming : fma(O0, alpha, incoming);
+      const float incoming1 = (TF_METAL_SOFTMAX_IDENTITY_GUARD && M == pm[i] && isfinite(pm[i]) && isfinite(po[i * HD + lane + 32])) ? po[i * HD + lane + 32] : po[i * HD + lane + 32] * beta;
+      O1 = (TF_METAL_SOFTMAX_IDENTITY_GUARD && alpha == 1.0f && isfinite(O1 + incoming1)) ? O1 + incoming1 : fma(O1, alpha, incoming1);
     }
     cm[c] = M;
     cl[c] = L;
@@ -382,10 +391,11 @@ inline void lfm2_merge_row(const device float* pm, const device float* pl, const
   for (uint c = 0; c < chunks; ++c) m = max(m, cm[c]);
   float l = 0.0f, o0 = 0.0f, o1 = 0.0f;
   for (uint c = 0; c < chunks; ++c) {
-    const float f = metal::fast::exp(cm[c] - m);
-    l += cl[c] * f;
-    o0 += c0[c] * f;
-    o1 += c1[c] * f;
+    const bool same = TF_METAL_SOFTMAX_IDENTITY_GUARD && cm[c] == m && isfinite(cm[c]);
+    const float f = same ? 1.0f : metal::fast::exp(cm[c] - m);
+    l += (same && isfinite(cl[c])) ? cl[c] : cl[c] * f;
+    o0 += (same && isfinite(c0[c])) ? c0[c] : c0[c] * f;
+    o1 += (same && isfinite(c1[c])) ? c1[c] : c1[c] * f;
   }
   device bfloat* out = y + (size_t(r) * QH + head) * HD;
   out[lane] = static_cast<bfloat>(o0 / l);

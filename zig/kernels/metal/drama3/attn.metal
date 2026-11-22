@@ -1,3 +1,6 @@
+#ifndef TF_METAL_SOFTMAX_IDENTITY_GUARD
+#define TF_METAL_SOFTMAX_IDENTITY_GUARD 1
+#endif
 // Drama 3 gated full attention (backbone and tower): 16 query heads, 2 KV heads, head dim 256, rotary on 64 dims.
 #include "d3_common.h"
 
@@ -84,10 +87,11 @@ struct AttnArgs {
     const float sc = simd_sum(d) * 0.0625f;
     const float4 v0 = bf4(vr[lane * 2]), v1 = bf4(vr[lane * 2 + 1]);
     const float nm = max(m, sc);
-    const float corr = precise::exp(m - nm), e = precise::exp(sc - nm);
-    l = l * corr + e;
+    const bool same = TF_METAL_SOFTMAX_IDENTITY_GUARD && nm == m && isfinite(m);
+    const float corr = same ? 1.0f : precise::exp(m - nm), e = precise::exp(sc - nm);
+    l = ((same && isfinite(l)) ? l : l * corr) + e;
     const float vv[8] = {v0.x, v0.y, v0.z, v0.w, v1.x, v1.y, v1.z, v1.w};
-    for (int j = 0; j < 8; ++j) acc[j] = acc[j] * corr + e * vv[j];
+    for (int j = 0; j < 8; ++j) acc[j] = ((same && isfinite(acc[j])) ? acc[j] : acc[j] * corr) + e * vv[j];
     m = nm;
   }
   threadgroup float sm[8], sl[8], sacc[8][256];
@@ -102,7 +106,7 @@ struct AttnArgs {
   float Ls = 0.0f, A = 0.0f;
   for (int k = 0; k < 8; ++k) {
     if (sm[k] == -INFINITY) continue;
-    const float c = precise::exp(sm[k] - M);
+    const float c = TF_METAL_SOFTMAX_IDENTITY_GUARD && sm[k] == M && isfinite(sm[k]) ? 1.0f : precise::exp(sm[k] - M);
     Ls += sl[k] * c;
     A += sacc[k][i] * c;
   }

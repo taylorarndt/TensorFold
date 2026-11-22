@@ -1,3 +1,6 @@
+#ifndef TF_METAL_SOFTMAX_IDENTITY_GUARD
+#define TF_METAL_SOFTMAX_IDENTITY_GUARD 1
+#endif
 // Idol's DINOv3 ViT-H+/16 encoder after gemm_nax.metal: bf16 rows rounded where transformers' torch code rounds them.
 
 inline float dn_b(float x) { return float(bfloat(x)); }
@@ -258,19 +261,21 @@ inline void dn_fold(thread const tfp::frag<float>& f, thread float (&r)[2]) {
         s[f][e] = float(pb[f][e]);
       }
     }
+    bool same[2];
     float scale_old[2];
     TF_UNROLL
     for (short r = 0; r < 2; r++) {
-      scale_old[r] = fast::exp2(top[r] - top_new[r]);
+      same[r] = TF_METAL_SOFTMAX_IDENTITY_GUARD && top_new[r] == top[r] && isfinite(top[r]);
+      scale_old[r] = same[r] ? 1.0f : fast::exp2(top[r] - top_new[r]);
       top[r] = top_new[r];
-      total[r] = total[r] * scale_old[r];
+      total[r] = (same[r] && isfinite(total[r])) ? total[r] : total[r] * scale_old[r];
     }
     dn_fold<false>(s[0], total);
     dn_fold<false>(s[1], total);
     TF_UNROLL
     for (short i = 0; i < 4; i++) {
       TF_UNROLL
-      for (short e = 0; e < 8; e++) acc[i][e] = acc[i][e] * scale_old[e >> 2];
+      for (short e = 0; e < 8; e++) if (!same[e >> 2] || !isfinite(acc[i][e])) acc[i][e] = acc[i][e] * scale_old[e >> 2];
     }
     simdgroup_barrier(mem_flags::mem_none);
     TF_UNROLL

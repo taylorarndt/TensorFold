@@ -1,3 +1,6 @@
+#ifndef TF_METAL_SOFTMAX_IDENTITY_GUARD
+#define TF_METAL_SOFTMAX_IDENTITY_GUARD 1
+#endif
 // Fixed contiguous key partitions keep one query's arithmetic independent of neighboring rows and lane width.
 #include <metal_stdlib>
 using namespace metal;
@@ -7,9 +10,7 @@ constant constexpr uint L3PER = 4096;
 constant constexpr uint L3PART = 1024;
 struct lfm3_attn_args { uint len, cap; float scale; uint window, chunk_base; };
 
-#ifndef L3_ATTN_ACC
 #define L3_ATTN_ACC float
-#endif
 
 inline float lfm3_attention_dot(const thread float* q, const device bfloat* k) {
   L3_ATTN_ACC dot = 0.0f;
@@ -20,9 +21,6 @@ inline float lfm3_attention_dot(const thread float* q, const device bfloat* k) {
 // Rare-path range extension only: FP32 mantissas, integer exponents, no precision reduction.
 #ifdef L3_RANGE_SKIP_REPAIR
 constant constexpr bool L3_RANGE_REPAIR_ENABLED=false;
-#else
-constant constexpr bool L3_RANGE_REPAIR_ENABLED=true;
-#endif
 struct l3_x { float m; int e; };
 inline l3_x l3_x_bits(uint u) {
  const uint sign=u&0x80000000u,be=(u>>23)&255u,fr=u&0x7fffffu;
@@ -89,10 +87,11 @@ inline void l3_x_merge(float part_max,float part_total,thread l3_x* part,
  thread float& maximum,thread float& total,thread l3_x* result){
  if(part_total==0)return;
  const float next=max(maximum,part_max),ga=maximum-next,gb=part_max-next;
- const float a=maximum==-INFINITY?0:metal::precise::exp(ga),b=metal::precise::exp(gb);
- const l3_x ae=maximum==-INFINITY?l3_x{0,0}:l3_x_exp(ga,a),be=l3_x_exp(gb,b);
- total=total*a+part_total*b;
- for(uint j=0;j<4;++j)result[j]=l3_x_add(l3_x_mul(result[j],ae),l3_x_mul(part[j],be));
+ const bool same=TF_METAL_SOFTMAX_IDENTITY_GUARD && next==maximum&&isfinite(maximum),incoming=TF_METAL_SOFTMAX_IDENTITY_GUARD && next==part_max&&isfinite(part_max);
+ const float a=maximum==-INFINITY?0:(same?1:metal::precise::exp(ga)),b=incoming?1:metal::precise::exp(gb);
+ const l3_x ae=maximum==-INFINITY?l3_x{0,0}:((same && isfinite(l3_x{1,0})) ?l3_x{1,0}:l3_x_exp(ga,a)),be=(incoming && isfinite(l3_x{1,0})) ?l3_x{1,0}:l3_x_exp(gb,b);
+ total=((same && isfinite(total)) ?total:total*a)+((incoming && isfinite(part_total)) ?part_total:part_total*b);
+ for(uint j=0;j<4;++j)result[j]=l3_x_add((same && isfinite(result[j])) ?result[j]:l3_x_mul(result[j],ae),(incoming && isfinite(part[j])) ?part[j]:l3_x_mul(part[j],be));
  maximum=next;
 }
 inline void l3_attention_replay(const device bfloat* queries,const device bfloat* keys,const device bfloat* values,
@@ -108,12 +107,13 @@ inline void l3_attention_replay(const device bfloat* queries,const device bfloat
    for(uint key=first;key<end;++key){
     const size_t base=(size_t(kh)*p.cap+key)*128+lane;
     const float score=lfm3_attention_dot(q,keys+base)*p.scale,next=max(pm,score),ga=pm-next,gp=score-next;
-    const float a=pm==-INFINITY?0:metal::precise::exp(ga),v=score==-INFINITY?0:metal::precise::exp(gp);
-    const l3_x ae=pm==-INFINITY?l3_x{0,0}:l3_x_exp(ga,a),pe=score==-INFINITY?l3_x{0,0}:l3_x_exp(gp,v);
-    pl=pl*a+v;
+    const bool same=TF_METAL_SOFTMAX_IDENTITY_GUARD && next==pm&&isfinite(pm);
+    const float a=pm==-INFINITY?0:(same?1:metal::precise::exp(ga)),v=score==-INFINITY?0:metal::precise::exp(gp);
+    const l3_x ae=pm==-INFINITY?l3_x{0,0}:((same && isfinite(l3_x{1,0})) ?l3_x{1,0}:l3_x_exp(ga,a)),pe=score==-INFINITY?l3_x{0,0}:l3_x_exp(gp,v);
+    pl=((same && isfinite(pl)) ?pl:pl*a)+v;
     for(uint j=0;j<4;++j){
      const l3_x value=l3_x_bf(as_type<ushort>(values[base+32*j]));
-     po[j]=l3_x_add(l3_x_mul(po[j],ae),l3_x_mul(pe,value));
+     po[j]=l3_x_add((same && isfinite(po[j])) ?po[j]:l3_x_mul(po[j],ae),l3_x_mul(pe,value));
     }
     pm=next;
    }
@@ -143,14 +143,15 @@ inline void lfm3_attention_partial(const device bfloat* queries, const device bf
     const size_t base = (size_t(kh) * p.cap + key) * 128 + lane;
     const float score = lfm3_attention_dot(q, keys + base) * p.scale;
     const float next = max(maximum, score);
-    const float alpha = maximum == -INFINITY ? 0.0f : metal::precise::exp(maximum - next);
+    const bool same = TF_METAL_SOFTMAX_IDENTITY_GUARD && next == maximum && isfinite(maximum);
+    const float alpha = maximum == -INFINITY ? 0.0f : (same ? 1.0f : metal::precise::exp(maximum - next));
     const float probability = score == -INFINITY ? 0.0f : metal::precise::exp(score - next);
     range_risk|=uint(l3_exp_risk(maximum-next,alpha)|l3_exp_risk(score-next,probability));
-    total = total * alpha + probability;
+    total = ((same && isfinite(total)) ? total : total * alpha) + probability;
     for (uint j = 0; j < 4; ++j) {
       const uint before=as_type<uint>(float(result[j])),a=as_type<uint>(alpha),b=as_type<uint>(probability),v=uint(as_type<ushort>(values[base+32*j]))<<16;
       range_risk|=uint(l3_product_risk(before,a)|l3_product_risk(b,v));
-      result[j] = result[j] * alpha + probability * float(values[base + 32 * j]);
+      result[j] = ((same && isfinite(result[j])) ? result[j] : result[j] * alpha) + probability * float(values[base + 32 * j]);
       range_risk|=uint(l3_sum_risk(before,a,b,v,as_type<uint>(float(result[j]))));
     }
     maximum = next;
@@ -166,14 +167,15 @@ inline void lfm3_attention_partial(const device bfloat* queries, const device bf
   for (uint part = 0; part < 4; ++part) {
     if (totals[part] == 0.0f) continue;
     const float next = max(merged_max, maxima[part]);
-    const float a = merged_max == -INFINITY ? 0.0f : metal::precise::exp(merged_max - next);
-    const float b = metal::precise::exp(maxima[part] - next);
+    const bool same = TF_METAL_SOFTMAX_IDENTITY_GUARD && next == merged_max && isfinite(merged_max), incoming = TF_METAL_SOFTMAX_IDENTITY_GUARD && next == maxima[part] && isfinite(maxima[part]);
+    const float a = merged_max == -INFINITY ? 0.0f : (same ? 1.0f : metal::precise::exp(merged_max - next));
+    const float b = incoming ? 1.0f : metal::precise::exp(maxima[part] - next);
     range_risk|=uint(l3_exp_risk(merged_max-next,a)|l3_exp_risk(maxima[part]-next,b));
-    merged_total = merged_total * a + totals[part] * b;
+    merged_total = ((same && isfinite(merged_total)) ? merged_total : merged_total * a) + ((incoming && isfinite(totals[part])) ? totals[part] : totals[part] * b);
     for (uint j = 0; j < 4; ++j) {
       const uint before=as_type<uint>(merged[j]),aa=as_type<uint>(a),bb=as_type<uint>(b),v=as_type<uint>(outputs[part*128+lane+32*j]);
       range_risk|=uint(l3_product_risk(before,aa)|l3_product_risk(v,bb));
-      merged[j] = merged[j] * a + outputs[part * 128 + lane + 32 * j] * b;
+      merged[j] = ((same && isfinite(merged[j])) ? merged[j] : merged[j] * a) + ((incoming && isfinite(outputs[part * 128 + lane + 32 * j])) ? outputs[part * 128 + lane + 32 * j] : outputs[part * 128 + lane + 32 * j] * b);
       range_risk|=uint(l3_sum_risk(before,aa,v,bb,as_type<uint>(merged[j])));
     }
     merged_max = next;
@@ -182,7 +184,6 @@ inline void lfm3_attention_partial(const device bfloat* queries, const device bf
   if (lane == 0) { pm[target] = merged_max; pl[target] = merged_total; range_flags[target]=chunk_risk;
 #ifdef L3_RANGE_CLEAR_RISK
   range_flags[target]=0u;
-#endif
  }
   for (uint j = 0; j < 4; ++j) po[target * 128 + lane + 32 * j] = merged[j];
 }
@@ -210,14 +211,15 @@ inline float lfm3_attention_merge(const device float* pm, const device float* pl
     if(risk!=nullptr&&range_flags!=nullptr)*risk|=range_flags[i]!=0;
     if (pl[i] == 0.0f) continue;
     const float next = max(maximum, pm[i]);
-    const float a = maximum == -INFINITY ? 0.0f : metal::precise::exp(maximum - next);
-    const float b = metal::precise::exp(pm[i] - next);
+    const bool same = TF_METAL_SOFTMAX_IDENTITY_GUARD && next == maximum && isfinite(maximum), incoming = TF_METAL_SOFTMAX_IDENTITY_GUARD && next == pm[i] && isfinite(pm[i]);
+    const float a = maximum == -INFINITY ? 0.0f : (same ? 1.0f : metal::precise::exp(maximum - next));
+    const float b = incoming ? 1.0f : metal::precise::exp(pm[i] - next);
     if(risk!=nullptr)*risk|=l3_exp_risk(maximum-next,a)|l3_exp_risk(pm[i]-next,b);
-    total = total * a + pl[i] * b;
+    total = ((same && isfinite(total)) ? total : total * a) + ((incoming && isfinite(pl[i])) ? pl[i] : pl[i] * b);
     for (uint j = 0; j < 4; ++j) {
       const uint before=as_type<uint>(float(result[j])),aa=as_type<uint>(a),bb=as_type<uint>(b),v=as_type<uint>(po[i*128+lane+32*j]);
       if(risk!=nullptr)*risk|=l3_product_risk(before,aa)|l3_product_risk(v,bb);
-      result[j] = float(L3_ATTN_ACC(result[j] * a + po[i * 128 + lane + 32 * j] * b));
+      result[j] = float(L3_ATTN_ACC(((same && isfinite(result[j])) ? result[j] : result[j] * a) + ((incoming && isfinite(po[i * 128 + lane + 32 * j])) ? po[i * 128 + lane + 32 * j] : po[i * 128 + lane + 32 * j] * b)));
       if(risk!=nullptr)*risk|=l3_sum_risk(before,aa,v,bb,as_type<uint>(float(result[j])));
     }
     maximum = next;
@@ -300,6 +302,5 @@ struct lfm3_attn_segment { ulong keys, values; uint base, rows; lfm3_attn_args a
   }
 #ifdef L3_SEGMENT_BAD_TAIL
   if (tg.y + 1 == seg.base + seg.rows) return;
-#endif
   for (uint j = 0; j < 4; ++j) y[(size_t(tg.y) * 16 + tg.x) * 128 + lane + 32 * j] = bfloat(result[j] / total);
 }

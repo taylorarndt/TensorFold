@@ -1,11 +1,12 @@
+#ifndef TF_METAL_SOFTMAX_IDENTITY_GUARD
+#define TF_METAL_SOFTMAX_IDENTITY_GUARD 1
+#endif
 // DeepSeek V4.1's vision tower: epilogues, 2D RoPE, full attention, SwiGLU, the aligner's unshuffle, the merge.
 #include <metal_stdlib>
 using namespace metal;
 #pragma clang fp contract(off)
 
-#ifndef TF_CTL
 #define TF_CTL 0 // planted faults 1 to 6, one per kernel; 0 is the kernel as served
-#endif
 
 inline float tf_vis_bf(float v) {
   return float(bfloat(v));
@@ -114,11 +115,11 @@ struct TfVisAttnArgs {
       s = t * a.scale;
     }
     const float mn = max(m, simd_max(s));
-    const float alpha = metal::precise::exp(m - mn);
+    const bool same = TF_METAL_SOFTMAX_IDENTITY_GUARD && mn == m && isfinite(m);
+    const float alpha = same ? 1.0f : metal::precise::exp(m - mn);
     const float p = j < a.n ? metal::precise::exp(s - (TF_CTL == 3 ? 0.0f : mn)) : 0.0f; // control 3: no max in the exponent
-    l = l * alpha + simd_sum(p);
-    acc0 = acc0 * alpha;
-    acc1 = acc1 * alpha;
+    l = ((same && isfinite(l)) ? l : l * alpha) + simd_sum(p);
+    if (!same || !isfinite(acc0) || !isfinite(acc1)) { acc0 = acc0 * alpha; acc1 = acc1 * alpha; }
     const uint cnt = min(32u, a.n - j0);
     for (uint jj = 0; jj < cnt; ++jj) {
       const float pj = simd_shuffle(p, ushort(jj));

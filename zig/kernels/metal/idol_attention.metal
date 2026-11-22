@@ -1,3 +1,6 @@
+#ifndef TF_METAL_SOFTMAX_IDENTITY_GUARD
+#define TF_METAL_SOFTMAX_IDENTITY_GUARD 1
+#endif
 // Idol's attention: tfp::attention_nax's online softmax at head width 64, every query row to every key row.
 
 constant constexpr float kIdMasked = -3.402823466e+38f;
@@ -82,19 +85,21 @@ inline void id_attention(const device T* Q, const device T* K, const device T* V
       // the units take an fp32 P short: round it to fp16 here, so the denominator sums the values P V multiplies
       for (short e = 0; e < 8; e++) s[f][e] = float(half(fast::exp2(s[f][e] - top_new[e >> 2])));
     }
+    bool same[2];
     float scale_old[2];
     TF_UNROLL
     for (short r = 0; r < 2; r++) {
-      scale_old[r] = fast::exp2(top[r] - top_new[r]);
+      same[r] = TF_METAL_SOFTMAX_IDENTITY_GUARD && top_new[r] == top[r] && isfinite(top[r]);
+      scale_old[r] = same[r] ? 1.0f : fast::exp2(top[r] - top_new[r]);
       top[r] = top_new[r];
-      total[r] = total[r] * scale_old[r];
+      total[r] = (same[r] && isfinite(total[r])) ? total[r] : total[r] * scale_old[r];
     }
     id_fold<false>(s[0], total);
     id_fold<false>(s[1], total);
     TF_UNROLL
     for (short i = 0; i < 4; i++) {
       TF_UNROLL
-      for (short e = 0; e < 8; e++) acc[i][e] = acc[i][e] * scale_old[e >> 2];
+      for (short e = 0; e < 8; e++) if (!same[e >> 2] || !isfinite(acc[i][e])) acc[i][e] = acc[i][e] * scale_old[e >> 2];
     }
     simdgroup_barrier(mem_flags::mem_none);
     TF_UNROLL

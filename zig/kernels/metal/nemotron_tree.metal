@@ -1,3 +1,6 @@
+#ifndef TF_METAL_SOFTMAX_IDENTITY_GUARD
+#define TF_METAL_SOFTMAX_IDENTITY_GUARD 1
+#endif
 // Nemotron's tree windows: Mamba by parent, attention by logical key position, KV compaction, row gathers, draft top-k.
 #include <metal_stdlib>
 using namespace metal;
@@ -138,13 +141,6 @@ template <int H, int DH, int NG, int DS, int XD, int PROJ, int DTOFF, int SSZ>
 #define TT_HI(i, n) (((i) & ((n) / 4)) != 0)
 #define TT_HALF(hh, i) (((i) & 1) | ((4 * (hh) + (((i) >> 1) & 3)) << 1) | (((i) & 8) << 1))
 #define TT_Y(b, k, hi) ((hi) * (TK / 4) + (b) * 4 + (k))
-#else
-#define TT_FN(lane) short(((((lane) >> 2) & 2) | ((lane) & 1)) * 4)
-#define TT_COL(i, n) (((i) >> 3) * 16 + ((i) & 3))
-#define TT_HI(i, n) (((i) & 4) != 0)
-#define TT_HALF(hh, i) ((hh) * 16 + (i))
-#define TT_Y(b, k, hi) ((b) * 8 + (hi) * 4 + (k))
-#endif
 
 // A node's keys past the shared pass, gathered by logical position (dims: P, PT, NCA, NCB, NT): one-row step's sums.
 template <int G, int D, int CK, int TK, int MAXD>
@@ -228,8 +224,9 @@ template <int G, int D, int CK, int TK, int MAXD>
     x0 = max(x0, simd_shuffle_xor(x0, 1)); x0 = max(x0, simd_shuffle_xor(x0, 8));
     x1 = max(x1, simd_shuffle_xor(x1, 1)); x1 = max(x1, simd_shuffle_xor(x1, 8));
     const float nm0 = max(m0, x0), nm1 = max(m1, x1);
-    const float f0 = (x0 == -INFINITY) ? 1.0f : fast::exp(m0 - nm0);
-    const float f1 = (x1 == -INFINITY) ? 1.0f : fast::exp(m1 - nm1);
+    const bool same0 = TF_METAL_SOFTMAX_IDENTITY_GUARD && nm0 == m0 && isfinite(m0), same1 = TF_METAL_SOFTMAX_IDENTITY_GUARD && nm1 == m1 && isfinite(m1);
+    const float f0 = (x0 == -INFINITY || same0) ? 1.0f : fast::exp(m0 - nm0);
+    const float f1 = (x1 == -INFINITY || same1) ? 1.0f : fast::exp(m1 - nm1);
     float p[TK / 2];
     for (int i = 0; i < TK / 2; i++) p[i] = (s[i] == -INFINITY) ? 0.0f : fast::exp(s[i] - (TT_HI(i, TK) ? nm1 : nm0));
     float y0 = 0.0f, y1 = 0.0f;
@@ -239,10 +236,10 @@ template <int G, int D, int CK, int TK, int MAXD>
     }
     y0 += simd_shuffle_xor(y0, 1); y0 += simd_shuffle_xor(y0, 8);
     y1 += simd_shuffle_xor(y1, 1); y1 += simd_shuffle_xor(y1, 8);
-    if (x0 != -INFINITY) { l0 = l0 * f0 + y0; m0 = nm0; }
-    if (x1 != -INFINITY) { l1 = l1 * f1 + y1; m1 = nm1; }
+    if (x0 != -INFINITY) { l0 = ((same0 && isfinite(l0)) ? l0 : l0 * f0) + y0; m0 = nm0; }
+    if (x1 != -INFINITY) { l1 = ((same1 && isfinite(l1)) ? l1 : l1 * f1) + y1; m1 = nm1; }
     for (int i = 0; i < TK / 2; i++) myP[(fm + (TT_HI(i, TK) ? 8 : 0)) * TK + fn + TT_COL(i, TK)] = half(p[i]);
-    for (int i = 0; i < D / 2; i++) { const float fct = TT_HI(i, D) ? f1 : f0; Olo[i] *= fct; }
+    for (int i = 0; i < D / 2; i++) { const bool same = TT_HI(i, D) ? same1 : same0; const float fct = TT_HI(i, D) ? f1 : f0; if (!same || !isfinite(Olo[i])) Olo[i] *= fct; }
     threadgroup_barrier(mem_flags::mem_threadgroup);
     for (uint e = lane; e < TK * D / 8; e += 32) {
       const int row = int(e) / (D / 8), col = (int(e) % (D / 8)) * 8;
@@ -290,9 +287,10 @@ template <int G, int D, int CK>
     if (mc == -INFINITY) continue;
     const float lc = PLA[row];
     const float nm = max(m, mc);
-    const float f1 = fast::exp(m - nm), f2 = fast::exp(mc - nm);
-    l = l * f1 + lc * f2;
-    for (int i = 0; i < DP; i++) o[i] = o[i] * f1 + POA[row * D + lane * DP + i] * f2;
+    const bool same1 = TF_METAL_SOFTMAX_IDENTITY_GUARD && nm == m && isfinite(m), same2 = TF_METAL_SOFTMAX_IDENTITY_GUARD && nm == mc && isfinite(mc);
+    const float f1 = same1 ? 1.0f : fast::exp(m - nm), f2 = same2 ? 1.0f : fast::exp(mc - nm);
+    l = ((same1 && isfinite(l)) ? l : l * f1) + ((same2 && isfinite(lc)) ? lc : lc * f2);
+    for (int i = 0; i < DP; i++) o[i] = ((same1 && isfinite(o[i])) ? o[i] : o[i] * f1) + ((same2 && isfinite(POA[row * D + lane * DP + i])) ? POA[row * D + lane * DP + i] : POA[row * D + lane * DP + i] * f2);
     m = nm;
   }
   for (int c = 0; c < NCB; c++) {
@@ -301,9 +299,10 @@ template <int G, int D, int CK>
     if (mc == -INFINITY) continue;
     const float lc = PLB[row];
     const float nm = max(m, mc);
-    const float f1 = fast::exp(m - nm), f2 = fast::exp(mc - nm);
-    l = l * f1 + lc * f2;
-    for (int i = 0; i < DP; i++) o[i] = o[i] * f1 + POB[row * D + lane * DP + i] * f2;
+    const bool same1 = TF_METAL_SOFTMAX_IDENTITY_GUARD && nm == m && isfinite(m), same2 = TF_METAL_SOFTMAX_IDENTITY_GUARD && nm == mc && isfinite(mc);
+    const float f1 = same1 ? 1.0f : fast::exp(m - nm), f2 = same2 ? 1.0f : fast::exp(mc - nm);
+    l = ((same1 && isfinite(l)) ? l : l * f1) + ((same2 && isfinite(lc)) ? lc : lc * f2);
+    for (int i = 0; i < DP; i++) o[i] = ((same1 && isfinite(o[i])) ? o[i] : o[i] * f1) + ((same2 && isfinite(POB[row * D + lane * DP + i])) ? POB[row * D + lane * DP + i] : POB[row * D + lane * DP + i] * f2);
     m = nm;
   }
   const int h = int(hk) * G + g;

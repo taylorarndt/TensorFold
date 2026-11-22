@@ -14,7 +14,7 @@ pub fn prepare(p: anytype) !void {
     for (0..g.cap) |j| @memcpy(cache[j * 576 ..][0..512], d.v[j * 512 ..][0..512]);
     p.aux[2] = try p.rig.input(std.mem.sliceAsBytes(cache));
     const qlat = try a.alloc(f32, d.rows * g.heads * 512);
-    @memset(qlat, 0);
+    for (qlat, 0..) |*x, i| x.* = c.fromBf16(d.q[i]);
     p.aux[4] = try p.rig.input(std.mem.sliceAsBytes(qlat));
     p.aux[3] = try p.rig.scratch(d.rows * g.heads * 16 * 514 * 4);
     if (p.kind == .kimi) {

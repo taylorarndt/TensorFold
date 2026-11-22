@@ -1,3 +1,6 @@
+#ifndef TF_METAL_SOFTMAX_IDENTITY_GUARD
+#define TF_METAL_SOFTMAX_IDENTITY_GUARD 1
+#endif
 // Unlimited-OCR-2's image encoder steps (SAM ViT-B, its neck, CLIP-L), rounded to bf16 where torch rounds.
 
 #include <metal_stdlib>
@@ -279,9 +282,9 @@ inline float uv_logit(float dot, uint key, uint row, uint head, constant UvAttn&
     const uint b = k0 / uv_block;
     if (b > 0 && k0 % uv_block == 0) {
       // a new block: the row's sums so far times exp(previous top - this top), as a diagonal product
-      const float c = metal::precise::exp(top[b - 1] - top[b]);
-      mass *= c;
-      simdgroup_barrier(mem_flags::mem_threadgroup);
+      const bool same = TF_METAL_SOFTMAX_IDENTITY_GUARD && top[b] == top[b - 1] && isfinite(top[b - 1]);
+      const float c = same ? 1.0f : metal::precise::exp(top[b - 1] - top[b]);
+      if (!same || !isfinite(mass)) mass *= c;
       for (uint e = lane; e < 64; e += 32) stage[e] = 0.0f;
       simdgroup_barrier(mem_flags::mem_threadgroup);
       if (part == 0) stage[my * 9] = c;

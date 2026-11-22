@@ -1,3 +1,6 @@
+#ifndef TF_METAL_SOFTMAX_IDENTITY_GUARD
+#define TF_METAL_SOFTMAX_IDENTITY_GUARD 1
+#endif
 // Flint's glue at the reference's rounding points (RecursiveSI's rec_mlx on MLX): bf16 residual, MLX rms_norm and rope.
 #include <metal_stdlib>
 using namespace metal;
@@ -181,9 +184,9 @@ struct fl_vec_args { uint rows, pos, heads, groups, ring, window, blocks, chunk,
       score[u] = live ? sc : -INFINITY;
     }
     const float peak = max(max(top, max(score[0], score[1])), max(score[2], score[3]));
-    const float rescale = fast::exp(top - peak);
-    mass *= rescale;
-    acc *= rescale;
+    const bool same = TF_METAL_SOFTMAX_IDENTITY_GUARD && peak == top && isfinite(top);
+    const float rescale = same ? 1.0f : fast::exp(top - peak);
+    if (!same || !isfinite(mass) || !all(isfinite(acc))) { mass *= rescale; acc *= rescale; }
     TF_UNROLL_4
     for (uint u = 0; u < 4; ++u) {
       const float w = fast::exp(score[u] - peak);
@@ -214,13 +217,14 @@ struct fl_vec_args { uint rows, pos, heads, groups, ring, window, blocks, chunk,
   for (uint b = lane0; b < a.blocks; b += 32) top = max(top, ms[b]);
   top = simd_max(top);
   float total = 0.0f;
-  for (uint b = lane0; b < a.blocks; b += 32) total += ls[b] > 0.0f ? ls[b] * fast::exp(ms[b] - top) : 0.0f;
+  for (uint b = lane0; b < a.blocks; b += 32) total += ls[b] > 0.0f ? (TF_METAL_SOFTMAX_IDENTITY_GUARD && ms[b] == top && isfinite(ms[b]) && isfinite(ls[b]) ? ls[b] : ls[b] * fast::exp(ms[b] - top)) : 0.0f;
   total = simd_sum(total) + fast::exp(sink - top);
   float acc[4] = {0.0f, 0.0f, 0.0f, 0.0f};
   for (uint b = sg0; b < a.blocks; b += 32) {
     if (ls[b] <= 0.0f) continue;
-    const float f = fast::exp(ms[b] - top);
-    for (uint j = 0; j < 4; ++j) acc[j] += f * PO[(at * a.blocks + b) * 128 + 4 * lane + j];
+    const bool same = TF_METAL_SOFTMAX_IDENTITY_GUARD && ms[b] == top && isfinite(ms[b]);
+    const float f = same ? 1.0f : fast::exp(ms[b] - top);
+    for (uint j = 0; j < 4; ++j) acc[j] += (same && isfinite(PO[(at * a.blocks + b) * 128 + 4 * lane + j])) ? PO[(at * a.blocks + b) * 128 + 4 * lane + j] : f * PO[(at * a.blocks + b) * 128 + 4 * lane + j];
   }
   for (uint j = 0; j < 4; ++j) {
     merged[lane * 32 + sg] = acc[j];

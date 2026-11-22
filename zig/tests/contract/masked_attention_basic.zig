@@ -10,6 +10,9 @@ pub const Kind = enum { gemma31_global, gemma31_sliding, gemma12_global, gemma12
 pub fn available(_: Kind) bool {
     return true;
 }
+pub fn portable(k: Kind) bool {
+    return k == .qwen35;
+}
 pub fn output(_: Kind) @import("contract").spec.Elem {
     return .bf16;
 }

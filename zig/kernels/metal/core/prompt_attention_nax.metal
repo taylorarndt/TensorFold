@@ -1,3 +1,6 @@
+#ifndef TF_METAL_SOFTMAX_IDENTITY_GUARD
+#define TF_METAL_SOFTMAX_IDENTITY_GUARD 1
+#endif
 // Spark2.5's and Llama's prompt attention on the tensor units (gemma4's prompt kernel over a [slot, KVH, DH] cache).
 #include "../nax.h"
 using namespace tfp;
@@ -33,40 +36,19 @@ using PT = float;
 
 template <bool TR>
 inline frag<bfloat> blk(const device bfloat* p, int ld, int r, int c, short2 home) {
-#ifndef TF_SIMD_FRAGS
   const device bfloat* q = p + (r + home.y) * ld + c + home.x;
   return frag<bfloat>(*(const device bfloat4*)q, *(const device bfloat4*)(q + 8 * ld));
-#else
-  frag<bfloat> f;
-  if (TR) {
-    frag_get_t(f, p, ld, r, c, home);
-  } else {
-    frag_get(f, p, ld, r, c, home);
-  }
-  return f;
-#endif
 }
 
 inline frag<PT> prob_frag(const threadgroup PT* pt, int r, int c, short2 home) {
-#ifndef TF_SIMD_FRAGS
   const threadgroup PT* q = pt + (r + home.y) * PP + c + home.x;
   return frag<PT>(*(const threadgroup vec<PT, 4>*)q, *(const threadgroup vec<PT, 4>*)(q + 8 * PP));
-#else
-  frag<PT> f;
-  frag_get(f, pt, PP, r, c, home);
-  return f;
-#endif
 }
 
 inline void prob_put(threadgroup PT* pt, int r, int c, short2 home, thread const frag<float>& s) {
-#ifndef TF_SIMD_FRAGS
   threadgroup PT* q = pt + (r + home.y) * PP + c + home.x;
   *(threadgroup vec<PT, 4>*)q = vec<PT, 4>(s[0], s[1], s[2], s[3]);
   *(threadgroup vec<PT, 4>*)(q + 8 * PP) = vec<PT, 4>(s[4], s[5], s[6], s[7]);
-#else
-  TF_UNROLL
-  for (short e = 0; e < 8; e++) pt[(r + home.y + (e >> 2) * 8) * PP + c + home.x + TF_COL(e)] = PT(s[e]);
-#endif
 }
 
 // Q [R, NQ, DH] at positions p0..; K, V the layer's cache; O [R, NQ, DH]. P: rows, p0. A tile is RT rows of a head.
@@ -138,19 +120,21 @@ inline void prob_put(threadgroup PT* pt, int r, int c, short2 home, thread const
         s[i][e] = s[i][e] == kMasked ? 0.0f : fast::exp2(s[i][e] - top_new[2 * (i >> 1) + (e >> 2)]);
       }
     }
+    bool same[4];
     float keep[4];
     TF_UNROLL
     for (short j = 0; j < 4; j++) {
-      keep[j] = top[j] == kMasked ? 0.0f : fast::exp2(top[j] - top_new[j]);
+      same[j] = TF_METAL_SOFTMAX_IDENTITY_GUARD && top_new[j] == top[j] && isfinite(top[j]);
+      keep[j] = top[j] == kMasked ? 0.0f : (same[j] ? 1.0f : fast::exp2(top[j] - top_new[j]));
       top[j] = top_new[j];
-      total[j] = total[j] * keep[j];
+      total[j] = (same[j] && isfinite(total[j])) ? total[j] : total[j] * keep[j];
     }
     TF_UNROLL
     for (short i = 0; i < 4; i++) fold<false>(s[i], total + 2 * (i >> 1));
     TF_UNROLL
     for (short i = 0; i < 8; i++) {
       TF_UNROLL
-      for (short e = 0; e < 8; e++) acc[i][e] = acc[i][e] * keep[2 * (i >> 2) + (e >> 2)];
+      for (short e = 0; e < 8; e++) if (!same[2 * (i >> 2) + (e >> 2)] || !isfinite(acc[i][e])) acc[i][e] = acc[i][e] * keep[2 * (i >> 2) + (e >> 2)];
     }
     for (int ph = 0; ph < BKT / PH; ph++) {
       if (ph > 0) threadgroup_barrier(mem_flags::mem_threadgroup); // the phase before has read the tile

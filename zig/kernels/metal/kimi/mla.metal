@@ -1,3 +1,6 @@
+#ifndef TF_METAL_SOFTMAX_IDENTITY_GUARD
+#define TF_METAL_SOFTMAX_IDENTITY_GUARD 1
+#endif
 // MLA in absorbed form (NoPE): latent cache rows, q into latent space, split-key attention, merge, W_uv and gate.
 #include "kimi_common.h"
 
@@ -92,9 +95,11 @@ kernel void k3_mla_attend(device const bfloat* q [[buffer(0)]], device const flo
       for (int i = 0; i < 16; ++i) p = fma(qv[i], float(key[16 * lane + i]), p);
       for (int i = 0; i < 2; ++i) p = fma(qr[i], float(key[LAT + 2 * lane + i]), p);
       const float sc = simd_sum(p) * a.scale;
-      const float mn = max(m, sc), corr = precise::exp(m - mn), e = precise::exp(sc - mn);
-      l = fma(l, corr, e);
-      for (int i = 0; i < 16; ++i) o[i] = fma(e, float(key[16 * lane + i]), o[i] * corr);
+      const float mn = max(m, sc);
+      const bool same = TF_METAL_SOFTMAX_IDENTITY_GUARD && mn == m && isfinite(m);
+      const float corr = same ? 1.0f : precise::exp(m - mn), e = precise::exp(sc - mn);
+      l = (same && isfinite(l + e)) ? l + e : fma(l, corr, e);
+      for (uint i = 0; i < 16; ++i) o[i] = fma(e, float(key[16 * lane + i]), (same && isfinite(o[i])) ? o[i] : o[i] * corr);
       m = mn;
     }
   }
@@ -114,9 +119,10 @@ kernel void k3_mla_merge(device const float* partial [[buffer(0)]], device const
   for (uint s = 0; s < SPLITS && k3_split(n, s).x < k3_split(n, s).y; ++s) M = max(M, p[s * (LAT + 2)]);
   float L = 0.0f, acc[2] = {0.0f, 0.0f};
   for (uint s = 0; s < SPLITS && k3_split(n, s).x < k3_split(n, s).y; ++s) {
-    const float f = precise::exp(p[s * (LAT + 2)] - M);
-    L = fma(p[s * (LAT + 2) + 1], f, L);
-    for (int i = 0; i < 2; ++i) acc[i] = fma(p[s * (LAT + 2) + 2 + 2 * t + i], f, acc[i]);
+    const bool same = TF_METAL_SOFTMAX_IDENTITY_GUARD && p[s * (LAT + 2)] == M && isfinite(p[s * (LAT + 2)]);
+    const float f = same ? 1.0f : precise::exp(p[s * (LAT + 2)] - M);
+    L = (same && isfinite(p[s * (LAT + 2) + 1] + L)) ? p[s * (LAT + 2) + 1] + L : fma(p[s * (LAT + 2) + 1], f, L);
+    for (int i = 0; i < 2; ++i) acc[i] = (same && isfinite(p[s * (LAT + 2) + 2 + 2 * t + i] + acc[i])) ? p[s * (LAT + 2) + 2 + 2 * t + i] + acc[i] : fma(p[s * (LAT + 2) + 2 + 2 * t + i], f, acc[i]);
   }
   for (int i = 0; i < 2; ++i) olat[(r * a.heads + hl) * LAT + 2 * t + i] = acc[i] / L;
 }

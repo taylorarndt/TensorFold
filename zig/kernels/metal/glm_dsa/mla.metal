@@ -1,3 +1,6 @@
+#ifndef TF_METAL_SOFTMAX_IDENTITY_GUARD
+#define TF_METAL_SOFTMAX_IDENTITY_GUARD 1
+#endif
 // GLM-5.3's MLA for lane rows: latent and rope keys in a bf16 cache, queries absorbed into latent space.
 #include <metal_stdlib>
 using namespace metal;
@@ -131,9 +134,11 @@ kernel void glm_mla_attend(const device float* qlat [[buffer(0)]], const device 
     for (uint i = 0; i < 16; ++i) p = fma(qv[i], float(key[16 * lane + i]), p);
     for (uint i = 0; i < 2; ++i) p = fma(qr[i], float(key[LAT + 2 * lane + i]), p);
     const float sc = glm_lanes(p) * a.scale;
-    const float mn = max(m, sc), corr = precise::exp(m - mn), e = precise::exp(sc - mn);
-    l = fma(l, corr, e);
-    for (uint i = 0; i < 16; ++i) o[i] = fma(e, float(key[16 * lane + i]), o[i] * corr);
+    const float mn = max(m, sc);
+    const bool same = TF_METAL_SOFTMAX_IDENTITY_GUARD && mn == m && isfinite(m);
+    const float corr = same ? 1.0f : precise::exp(m - mn), e = precise::exp(sc - mn);
+    l = (same && isfinite(l + e)) ? l + e : fma(l, corr, e);
+    for (uint i = 0; i < 16; ++i) o[i] = fma(e, float(key[16 * lane + i]), (same && isfinite(o[i])) ? o[i] : o[i] * corr);
     m = mn;
   }
   if (lane == 0) out[0] = m, out[1] = l;
@@ -152,9 +157,10 @@ kernel void glm_mla_merge(const device float* partial [[buffer(0)]], const devic
   float L = 0.0f, acc[2] = {0.0f, 0.0f};
   for (uint s = 0; s < SPLITS; ++s) {
     if (glm_split(n, s).x >= glm_split(n, s).y) continue;
-    const float f = precise::exp(p[s * (LAT + 2)] - M);
-    L = fma(p[s * (LAT + 2) + 1], f, L);
-    for (uint i = 0; i < 2; ++i) acc[i] = fma(p[s * (LAT + 2) + 2 + 2 * t + i], f, acc[i]);
+    const bool same = TF_METAL_SOFTMAX_IDENTITY_GUARD && p[s * (LAT + 2)] == M && isfinite(p[s * (LAT + 2)]);
+    const float f = same ? 1.0f : precise::exp(p[s * (LAT + 2)] - M);
+    L = (same && isfinite(p[s * (LAT + 2) + 1] + L)) ? p[s * (LAT + 2) + 1] + L : fma(p[s * (LAT + 2) + 1], f, L);
+    for (int i = 0; i < 2; ++i) acc[i] = (same && isfinite(p[s * (LAT + 2) + 2 + 2 * t + i] + acc[i])) ? p[s * (LAT + 2) + 2 + 2 * t + i] + acc[i] : fma(p[s * (LAT + 2) + 2 + 2 * t + i], f, acc[i]);
   }
   for (uint i = 0; i < 2; ++i) olat[(ulong(r) * a.heads + h) * LAT + 2 * t + i] = precise::divide(acc[i], L);
 }

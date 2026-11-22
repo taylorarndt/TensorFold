@@ -1,3 +1,6 @@
+#ifndef TF_METAL_SOFTMAX_IDENTITY_GUARD
+#define TF_METAL_SOFTMAX_IDENTITY_GUARD 1
+#endif
 // Hy4-flash's absorbed-MLA BF16 products on the tensor units (nax.h's 16x32x16 op)
 #include "../nax.h"
 using namespace tfp;
@@ -143,7 +146,7 @@ inline void hy4_attend_nax(const device bfloat* query, const device bfloat* cach
             tmax[i] = max(tmax[i], simd_shuffle_xor(tmax[i], ushort(1)));
             tmax[i] = max(tmax[i], simd_shuffle_xor(tmax[i], ushort(8)));
             const float next = max(m[i], tmax[i]);
-            alpha[i] = next == -INFINITY ? 1.0f : precise::exp(m[i] - next);
+            alpha[i] = next == -INFINITY ? 1.0f : (TF_METAL_SOFTMAX_IDENTITY_GUARD && next == m[i] && isfinite(m[i]) ? 1.0f : precise::exp(m[i] - next));
             m[i] = next;
         }
         float sum[2] = {0.0f, 0.0f};
@@ -162,14 +165,14 @@ inline void hy4_attend_nax(const device bfloat* query, const device bfloat* cach
         for (int i = 0; i < 2; ++i) {
             sum[i] += simd_shuffle_xor(sum[i], ushort(1));
             sum[i] += simd_shuffle_xor(sum[i], ushort(8));
-            l[i] = l[i] * alpha[i] + sum[i];
+            l[i] = (alpha[i] == 1.0f ? l[i] : l[i] * alpha[i]) + sum[i];
         }
         TF_UNROLL
         for (int j = 0; j < 4; ++j) {
             TF_UNROLL
             for (short e = 0; e < 8; e++) {
-                o[j][0][e] *= alpha[e >> 2];
-                o[j][1][e] *= alpha[e >> 2];
+                if (alpha[e >> 2] != 1.0f) o[j][0][e] *= alpha[e >> 2];
+                if (alpha[e >> 2] != 1.0f) o[j][1][e] *= alpha[e >> 2];
             }
             const int n = int(sg) * 128 + j * 32;
             frag<bfloat> v0, v1;
@@ -207,11 +210,13 @@ inline void hy4_attend_nax(const device bfloat* query, const device bfloat* cach
         return;
     }
     const float sink = sinks[h];
+    bool same[2];
     float keep[2], denom[2];
     for (int i = 0; i < 2; ++i) {
         const float top = max(m[i], sink);
-        keep[i] = m[i] == -INFINITY ? 0.0f : precise::exp(m[i] - top);
-        denom[i] = l[i] * keep[i] + precise::exp(sink - top);
+        same[i] = TF_METAL_SOFTMAX_IDENTITY_GUARD && top == m[i] && isfinite(m[i]);
+        keep[i] = m[i] == -INFINITY ? 0.0f : (same[i] ? 1.0f : precise::exp(m[i] - top));
+        denom[i] = ((same[i] && isfinite(l[i])) ? l[i] : l[i] * keep[i]) + precise::exp(sink - top);
     }
     TF_UNROLL
     for (int j = 0; j < 4; ++j) {
@@ -220,8 +225,8 @@ inline void hy4_attend_nax(const device bfloat* query, const device bfloat* cach
             const int i = e >> 2, rr = home.y + i * 8, cc = home.x + TF_COL(e);
             if (rr < live) {
                 device bfloat* row = out + (long(r0 + rr) * heads + h) * hy4_lw + int(sg) * 128 + j * 32 + cc;
-                row[0] = bfloat(precise::divide(o[j][0][e] * keep[i], denom[i]));
-                row[16] = bfloat(precise::divide(o[j][1][e] * keep[i], denom[i]));
+                row[0] = bfloat(precise::divide((same[i] && isfinite(o[j][0][e])) ? o[j][0][e] : o[j][0][e] * keep[i], denom[i]));
+                row[16] = bfloat(precise::divide((same[i] && isfinite(o[j][1][e])) ? o[j][1][e] : o[j][1][e] * keep[i], denom[i]));
             }
         }
     }
@@ -262,7 +267,7 @@ inline void hy4_attend_nax(const device bfloat* query, const device bfloat* cach
         w[z] = 0.0f;
         if (z >= splits) continue;
         const device float* ml = ml_part + ((z * rows + r) * heads + h) * 2;
-        w[z] = ml[0] == -INFINITY ? 0.0f : precise::exp(ml[0] - top);
+        w[z] = ml[0] == -INFINITY ? 0.0f : (TF_METAL_SOFTMAX_IDENTITY_GUARD && ml[0] == top && isfinite(ml[0]) ? 1.0f : precise::exp(ml[0] - top));
         denom += ml[1] * w[z];
     }
     for (int c = int(t) * 4; c < int(t) * 4 + 4; ++c) {

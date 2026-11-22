@@ -1,3 +1,6 @@
+#ifndef TF_METAL_SOFTMAX_IDENTITY_GUARD
+#define TF_METAL_SOFTMAX_IDENTITY_GUARD 1
+#endif
 // LFM2 prompt attention on the tensor units: lfm2_attn_mma's cuts and merge, after lfm2.metal with nax.h inlined.
 #include "../nax.h"
 using namespace tfp;
@@ -99,7 +102,7 @@ inline float lfm2_nax_rowsum(float v) {
         bm[r] = lfm2_nax_rowmax(bm[r]);
         live[r] = bm[r] != -INFINITY;  // per row: a block with no visible key leaves its state as it is
         m2[r] = live[r] ? max(m[r], bm[r]) : m[r];
-        alpha[r] = live[r] ? metal::fast::exp(m[r] - m2[r]) : 1.0f;
+        alpha[r] = live[r] ? (TF_METAL_SOFTMAX_IDENTITY_GUARD && m2[r] == m[r] && isfinite(m[r]) ? 1.0f : metal::fast::exp(m[r] - m2[r])) : 1.0f;
       }
       frag<bfloat> pb[2];
       float bs[2] = {0.0f, 0.0f};
@@ -111,11 +114,11 @@ inline float lfm2_nax_rowsum(float v) {
           bs[r] += v;
         }
       for (int r = 0; r < 2; ++r) {
-        l[r] = fma(l[r], alpha[r], lfm2_nax_rowsum(bs[r]));
+        l[r] = TF_METAL_SOFTMAX_IDENTITY_GUARD && alpha[r] == 1.0f && isfinite(l[r] + lfm2_nax_rowsum(bs[r])) ? l[r] + lfm2_nax_rowsum(bs[r]) : fma(l[r], alpha[r], lfm2_nax_rowsum(bs[r]));
         m[r] = m2[r];
       }
       for (int i = 0; i < 4; ++i)
-        for (short e = 0; e < 8; ++e) o[i][e] *= alpha[e >> 2];
+        for (short e = 0; e < 8; ++e) if (alpha[e >> 2] != 1.0f || !isfinite(o[i][e])) o[i][e] *= alpha[e >> 2];
       for (int h = 0; h < 2; ++h) {
         frag<bfloat> v0, v1, v2, v3;
         frag_get_tg(v0, vsb, NP, 16 * h, 0, home);
@@ -132,7 +135,10 @@ inline float lfm2_nax_rowsum(float v) {
       float alpha, beta;
       lfm2_merge(M[r], L[r], m[r], l[r], alpha, beta);
       for (int i = 0; i < 4; ++i)
-        for (short e = 0; e < 4; ++e) O[i][4 * r + e] = fma(O[i][4 * r + e], alpha, o[i][4 * r + e] * beta);
+        for (short e = 0; e < 4; ++e) {
+          const float incoming = (TF_METAL_SOFTMAX_IDENTITY_GUARD && M[r] == m[r] && isfinite(m[r]) && isfinite(o[i][4 * r + e])) ? o[i][4 * r + e] : o[i][4 * r + e] * beta;
+          O[i][4 * r + e] = (TF_METAL_SOFTMAX_IDENTITY_GUARD && alpha == 1.0f && isfinite(O[i][4 * r + e] + incoming)) ? O[i][4 * r + e] + incoming : fma(O[i][4 * r + e], alpha, incoming);
+        }
     }
   }
   for (int r = 0; r < 2; ++r) {

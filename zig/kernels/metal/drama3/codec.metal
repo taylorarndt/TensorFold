@@ -1,3 +1,6 @@
+#ifndef TF_METAL_SOFTMAX_IDENTITY_GUARD
+#define TF_METAL_SOFTMAX_IDENTITY_GUARD 1
+#endif
 // Drama 3's codec (Fish S2 modded DAC) in fp32: the GEMM and the glue between them, time-major [rows, channels].
 #include "d3_common.h"
 
@@ -247,10 +250,11 @@ struct CAttnArgs {
     const ulong r = (ulong)(uint(p) % a.ring) * 1024 + h * 64 + 2 * lane;
     const float sc = simd_sum(fma(q1, kc[r + 1], q0 * kc[r]));
     const float nm = max(m, sc);
-    const float corr = precise::exp(m - nm), e = precise::exp(sc - nm);
-    l = l * corr + e;
-    a0 = a0 * corr + e * vc[r];
-    a1 = a1 * corr + e * vc[r + 1];
+    const bool same = TF_METAL_SOFTMAX_IDENTITY_GUARD && nm == m && isfinite(m);
+    const float corr = same ? 1.0f : precise::exp(m - nm), e = precise::exp(sc - nm);
+    l = ((same && isfinite(l)) ? l : l * corr) + e;
+    a0 = ((same && isfinite(a0)) ? a0 : a0 * corr) + e * vc[r];
+    a1 = ((same && isfinite(a1)) ? a1 : a1 * corr) + e * vc[r + 1];
     m = nm;
   }
   out[(ulong)t * 1024 + h * 64 + 2 * lane] = a0 / l;

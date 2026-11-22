@@ -1,12 +1,13 @@
+#ifndef TF_METAL_SOFTMAX_IDENTITY_GUARD
+#define TF_METAL_SOFTMAX_IDENTITY_GUARD 1
+#endif
 // Own stream_attention arithmetic uses absolute key tiles, half probabilities and ordered FP32 chunk merge.
 #include <metal_stdlib>
 #include <MetalPerformancePrimitives/MetalPerformancePrimitives.h>
 using namespace metal;
 using namespace mpp::tensor_ops;
-#ifndef Q27_G
 #define Q27_G 6 // query heads a KV head (the 27B's); the model's host prepends its own
 #define Q27_KVH 4
-#endif
 constant constexpr int G = Q27_G, KVH = Q27_KVH, D = 256, TK = 64, MAXD = 128, MG = 8, MS = 12, NW = 4; // a row's key chunk is its node word 2
 struct Q27AttnReadPtrs { device const bfloat* keys; device const bfloat* values; };
 
@@ -96,8 +97,9 @@ kernel void q27_attn_prefix(device const bfloat* Qp [[buffer(0)]], device const 
     x0 = max(x0, simd_shuffle_xor(x0, 1)); x0 = max(x0, simd_shuffle_xor(x0, 8));
     x1 = max(x1, simd_shuffle_xor(x1, 1)); x1 = max(x1, simd_shuffle_xor(x1, 8));
     const float nm0 = max(m0, x0), nm1 = max(m1, x1);
-    const float f0 = (x0 == -INFINITY) ? 1.0f : fast::exp(m0 - nm0);
-    const float f1 = (x1 == -INFINITY) ? 1.0f : fast::exp(m1 - nm1);
+    const bool same0 = TF_METAL_SOFTMAX_IDENTITY_GUARD && nm0 == m0 && isfinite(m0), same1 = TF_METAL_SOFTMAX_IDENTITY_GUARD && nm1 == m1 && isfinite(m1);
+    const float f0 = (x0 == -INFINITY || same0) ? 1.0f : fast::exp(m0 - nm0);
+    const float f1 = (x1 == -INFINITY || same1) ? 1.0f : fast::exp(m1 - nm1);
     float p[TK / 2];
     for (int i = 0; i < TK / 2; i++) p[i] = (s[i] == -INFINITY) ? 0.0f : fast::exp(s[i] - ((i & 4) ? nm1 : nm0));
     float y0 = 0.0f, y1 = 0.0f;
@@ -107,12 +109,12 @@ kernel void q27_attn_prefix(device const bfloat* Qp [[buffer(0)]], device const 
     }
     y0 += simd_shuffle_xor(y0, 1); y0 += simd_shuffle_xor(y0, 8);
     y1 += simd_shuffle_xor(y1, 1); y1 += simd_shuffle_xor(y1, 8);
-    if (x0 != -INFINITY) { l0 = l0 * f0 + y0; m0 = nm0; }
-    if (x1 != -INFINITY) { l1 = l1 * f1 + y1; m1 = nm1; }
+    if (x0 != -INFINITY) { l0 = ((same0 && isfinite(l0)) ? l0 : l0 * f0) + y0; m0 = nm0; }
+    if (x1 != -INFINITY) { l1 = ((same1 && isfinite(l1)) ? l1 : l1 * f1) + y1; m1 = nm1; }
     auto Pc = opS.template get_destination_cooperative_tensor<decltype(aQ), decltype(bK), half>();
     for (int i = 0; i < TK / 2; i++) Pc[i] = half(p[i]);
     auto Pin = opO.template get_left_input_cooperative_tensor<half, bfloat, float>(Pc);
-    for (int i = 0; i < 64; i++) O[i] *= (i & 4) ? f1 : f0;
+    for (int i = 0; i < 64; i++) { const bool same = (i & 4) ? same1 : same0; const float f = (i & 4) ? f1 : f0; if (!same || !isfinite(O[i])) O[i] *= f; }
     if (!masked || kt + TK <= seen) {
       auto bV = tV.slice(hi ? 128 : 0, kt);
       opO.run(Pin, bV, O);
@@ -178,7 +180,6 @@ kernel void q27_attn_tail(device const bfloat* QB [[buffer(0)]], device const Q2
     device float* PO [[buffer(9)]], device float* PM [[buffer(10)]], device float* PL [[buffer(11)]],
 #if Q27_JOIN
     device const int* mates [[buffer(12)]],
-#endif
     uint3 threadgroup_position_in_grid [[threadgroup_position_in_grid]], ushort thread_index_in_simdgroup [[thread_index_in_simdgroup]],
     ushort sg [[simdgroup_index_in_threadgroup]], ushort tid [[thread_index_in_threadgroup]]) {
   // four simdgroups load each K and V tile; simdgroup 0 alone does the arithmetic, in the one-simdgroup order
@@ -196,7 +197,6 @@ kernel void q27_attn_tail(device const bfloat* QB [[buffer(0)]], device const Q2
   if (joint && mates[3 * node + 2] == 2) return;
   const int mate = mates[3 * node];
   const int nB = joint && mate >= 0 ? meta[MG + nodes[NW * mate + 1] * MS + 4] + nodes[NW * mate] + 1 : 0;
-#endif
   const int la = meta[MG + st * MS + 3] * 16 + (int(node) - meta[MG + st * MS + 6]) * G;
   const int depth = nodes[NW * node];
   const device bfloat* Kb = caches[st].keys;
@@ -209,9 +209,6 @@ kernel void q27_attn_tail(device const bfloat* QB [[buffer(0)]], device const Q2
   const int n0 = r0 < G ? nmax : 0;
 #if Q27_JOIN
   const int n1 = r1 < G ? nmax : (r1 - 8 < G ? nB : 0);
-#else
-  const int n1 = r1 < G ? nmax : 0;
-#endif
   threadgroup half myP[16 * TK];
   threadgroup bfloat KV[32 * D];
   const device bfloat* kbase = (const device bfloat*)Kb + (int64_t)hk * meta[MG + st * MS + 7];
@@ -274,8 +271,9 @@ kernel void q27_attn_tail(device const bfloat* QB [[buffer(0)]], device const Q2
     x0 = max(x0, simd_shuffle_xor(x0, 1)); x0 = max(x0, simd_shuffle_xor(x0, 8));
     x1 = max(x1, simd_shuffle_xor(x1, 1)); x1 = max(x1, simd_shuffle_xor(x1, 8));
     const float nm0 = max(m0, x0), nm1 = max(m1, x1);
-    const float f0 = (x0 == -INFINITY) ? 1.0f : fast::exp(m0 - nm0);
-    const float f1 = (x1 == -INFINITY) ? 1.0f : fast::exp(m1 - nm1);
+    const bool same0 = TF_METAL_SOFTMAX_IDENTITY_GUARD && nm0 == m0 && isfinite(m0), same1 = TF_METAL_SOFTMAX_IDENTITY_GUARD && nm1 == m1 && isfinite(m1);
+    const float f0 = (x0 == -INFINITY || same0) ? 1.0f : fast::exp(m0 - nm0);
+    const float f1 = (x1 == -INFINITY || same1) ? 1.0f : fast::exp(m1 - nm1);
     float p[TK / 2];
     for (int i = 0; i < TK / 2; i++) p[i] = (s[i] == -INFINITY) ? 0.0f : fast::exp(s[i] - ((i & 4) ? nm1 : nm0));
     float y0 = 0.0f, y1 = 0.0f;
@@ -285,14 +283,14 @@ kernel void q27_attn_tail(device const bfloat* QB [[buffer(0)]], device const Q2
     }
     y0 += simd_shuffle_xor(y0, 1); y0 += simd_shuffle_xor(y0, 8);
     y1 += simd_shuffle_xor(y1, 1); y1 += simd_shuffle_xor(y1, 8);
-    if (x0 != -INFINITY) { l0 = l0 * f0 + y0; m0 = nm0; }
-    if (x1 != -INFINITY) { l1 = l1 * f1 + y1; m1 = nm1; }
+    if (x0 != -INFINITY) { l0 = ((same0 && isfinite(l0)) ? l0 : l0 * f0) + y0; m0 = nm0; }
+    if (x1 != -INFINITY) { l1 = ((same1 && isfinite(l1)) ? l1 : l1 * f1) + y1; m1 = nm1; }
     for (int f = 0; f < TK / 16; f++)
       for (int i = 0; i < 4; i++) {
         myP[fm * TK + f * 16 + fn + i] = half(p[f * 8 + i]);
         myP[(fm + 8) * TK + f * 16 + fn + i] = half(p[f * 8 + 4 + i]);
       }
-    for (int i = 0; i < 64; i++) { const float f = (i & 4) ? f1 : f0; Olo[i] *= f; Ohi[i] *= f; }
+    for (int i = 0; i < 64; i++) { const bool same = (i & 4) ? same1 : same0; const float f = (i & 4) ? f1 : f0; if (!same || !isfinite(Olo[i]) || !isfinite(Ohi[i])) { Olo[i] *= f; Ohi[i] *= f; } }
     }
     for (int hv = 0; hv < 2; hv++) {
       threadgroup_barrier(mem_flags::mem_threadgroup);
@@ -331,7 +329,6 @@ kernel void q27_attn_merge(device const float* POA [[buffer(0)]], device const f
     device const bfloat* QG [[buffer(9)]], constant uint& gated [[buffer(10)]], constant uint& heads [[buffer(11)]],
 #if Q27_JOIN
     device const int* mates [[buffer(12)]],
-#endif
     uint3 threadgroup_position_in_grid [[threadgroup_position_in_grid]], uint thread_index_in_simdgroup [[thread_index_in_simdgroup]]) {
   const uint lane = thread_index_in_simdgroup;
   const uint hk = threadgroup_position_in_grid.x;
@@ -361,10 +358,11 @@ kernel void q27_attn_merge(device const float* POA [[buffer(0)]], device const f
       if (mc == -INFINITY) continue;
       const float lc = lcs[j];
       const float nm = max(m, mc);
-      const float f1 = fast::exp(m - nm), f2 = fast::exp(mc - nm);
-      l = l * f1 + lc * f2;
-      for (int i = 0; i < 4; i++) o[i] = o[i] * f1 + lo[j][i] * f2;
-      for (int i = 0; i < 4; i++) o[4 + i] = o[4 + i] * f1 + hi[j][i] * f2;
+      const bool same1 = TF_METAL_SOFTMAX_IDENTITY_GUARD && nm == m && isfinite(m), same2 = TF_METAL_SOFTMAX_IDENTITY_GUARD && nm == mc && isfinite(mc);
+      const float f1 = same1 ? 1.0f : fast::exp(m - nm), f2 = same2 ? 1.0f : fast::exp(mc - nm);
+      l = ((same1 && isfinite(l)) ? l : l * f1) + ((same2 && isfinite(lc)) ? lc : lc * f2);
+      for (int i = 0; i < 4; i++) o[i] = ((same1 && isfinite(o[i])) ? o[i] : o[i] * f1) + ((same2 && isfinite(lo[j][i])) ? lo[j][i] : lo[j][i] * f2);
+      for (int i = 0; i < 4; i++) o[4 + i] = ((same1 && isfinite(o[4 + i])) ? o[4 + i] : o[4 + i] * f1) + ((same2 && isfinite(hi[j][i])) ? hi[j][i] : hi[j][i] * f2);
       m = nm;
     }
   }
@@ -372,16 +370,14 @@ kernel void q27_attn_merge(device const float* POA [[buffer(0)]], device const f
 #if Q27_JOIN
     const bool rides = mates[3 * node + 2] == 2 && c < mates[3 * node + 1];
     const int64_t row = (((int64_t)hk * NCB + c) * W + (rides ? mates[3 * node] : node)) * 16 + g + (rides ? 8 : 0);
-#else
-    const int64_t row = (((int64_t)hk * NCB + c) * W + node) * 16 + g;
-#endif
     const float mc = PMB[row];
     if (mc == -INFINITY) continue;
     const float lc = PLB[row];
     const float nm = max(m, mc);
-    const float f1 = fast::exp(m - nm), f2 = fast::exp(mc - nm);
-    l = l * f1 + lc * f2;
-    for (int i = 0; i < DP; i++) o[i] = o[i] * f1 + POB[row * D + lane * DP + i] * f2;
+    const bool same1 = TF_METAL_SOFTMAX_IDENTITY_GUARD && nm == m && isfinite(m), same2 = TF_METAL_SOFTMAX_IDENTITY_GUARD && nm == mc && isfinite(mc);
+    const float f1 = same1 ? 1.0f : fast::exp(m - nm), f2 = same2 ? 1.0f : fast::exp(mc - nm);
+    l = ((same1 && isfinite(l)) ? l : l * f1) + ((same2 && isfinite(lc)) ? lc : lc * f2);
+    for (int i = 0; i < DP; i++) o[i] = ((same1 && isfinite(o[i])) ? o[i] : o[i] * f1) + ((same2 && isfinite(POB[row * D + lane * DP + i])) ? POB[row * D + lane * DP + i] : POB[row * D + lane * DP + i] * f2);
     m = nm;
   }
   const int h = hk * G + g;
@@ -402,7 +398,6 @@ kernel void q27_attn_merge_single(device const float* POA [[buffer(0)]], device 
     device const bfloat* QG [[buffer(9)]], constant uint& gated [[buffer(10)]],
 #if Q27_JOIN
     device const int* mates [[buffer(12)]],
-#endif
     uint3 threadgroup_position_in_grid [[threadgroup_position_in_grid]], uint thread_index_in_simdgroup [[thread_index_in_simdgroup]]) {
   const uint lane = thread_index_in_simdgroup;
   const uint hk = threadgroup_position_in_grid.x;
@@ -432,10 +427,11 @@ kernel void q27_attn_merge_single(device const float* POA [[buffer(0)]], device 
       if (mc == -INFINITY) continue;
       const float lc = lcs[j];
       const float nm = max(m, mc);
-      const float f1 = fast::exp(m - nm), f2 = fast::exp(mc - nm);
-      l = l * f1 + lc * f2;
-      for (int i = 0; i < 4; i++) o[i] = o[i] * f1 + lo[j][i] * f2;
-      for (int i = 0; i < 4; i++) o[4 + i] = o[4 + i] * f1 + hi[j][i] * f2;
+      const bool same1 = TF_METAL_SOFTMAX_IDENTITY_GUARD && nm == m && isfinite(m), same2 = TF_METAL_SOFTMAX_IDENTITY_GUARD && nm == mc && isfinite(mc);
+      const float f1 = same1 ? 1.0f : fast::exp(m - nm), f2 = same2 ? 1.0f : fast::exp(mc - nm);
+      l = ((same1 && isfinite(l)) ? l : l * f1) + ((same2 && isfinite(lc)) ? lc : lc * f2);
+      for (int i = 0; i < 4; i++) o[i] = ((same1 && isfinite(o[i])) ? o[i] : o[i] * f1) + ((same2 && isfinite(lo[j][i])) ? lo[j][i] : lo[j][i] * f2);
+      for (int i = 0; i < 4; i++) o[4 + i] = ((same1 && isfinite(o[4 + i])) ? o[4 + i] : o[4 + i] * f1) + ((same2 && isfinite(hi[j][i])) ? hi[j][i] : hi[j][i] * f2);
       m = nm;
     }
   }
@@ -443,16 +439,14 @@ kernel void q27_attn_merge_single(device const float* POA [[buffer(0)]], device 
 #if Q27_JOIN
     const bool rides = mates[3 * node + 2] == 2 && c < mates[3 * node + 1];
     const int64_t row = (((int64_t)hk * NCB + c) * W + (rides ? mates[3 * node] : node)) * 16 + g + (rides ? 8 : 0);
-#else
-    const int64_t row = (((int64_t)hk * NCB + c) * W + node) * 16 + g;
-#endif
     const float mc = PMB[row];
     if (mc == -INFINITY) continue;
     const float lc = PLB[row];
     const float nm = max(m, mc);
-    const float f1 = fast::exp(m - nm), f2 = fast::exp(mc - nm);
-    l = l * f1 + lc * f2;
-    for (int i = 0; i < DP; i++) o[i] = o[i] * f1 + POB[row * D + lane * DP + i] * f2;
+    const bool same1 = TF_METAL_SOFTMAX_IDENTITY_GUARD && nm == m && isfinite(m), same2 = TF_METAL_SOFTMAX_IDENTITY_GUARD && nm == mc && isfinite(mc);
+    const float f1 = same1 ? 1.0f : fast::exp(m - nm), f2 = same2 ? 1.0f : fast::exp(mc - nm);
+    l = ((same1 && isfinite(l)) ? l : l * f1) + ((same2 && isfinite(lc)) ? lc : lc * f2);
+    for (int i = 0; i < DP; i++) o[i] = ((same1 && isfinite(o[i])) ? o[i] : o[i] * f1) + ((same2 && isfinite(POB[row * D + lane * DP + i])) ? POB[row * D + lane * DP + i] : POB[row * D + lane * DP + i] * f2);
     m = nm;
   }
   const int h = hk * G + g;

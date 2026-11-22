@@ -31,6 +31,10 @@ Shared helpers that hold the cross-family parts:
 Flash Next CUDA sampled reductions: one check in top-k and batched verify/draft completions prepared (#2920);
 CUDA candidate bytes, parity and served/speed qualification are pending.
 
+Metal identity-rescale guards are in review. Raw-output device A/B and whole-round gain are unmeasured;
+no Metal family is marked done for this preparation.
+CUDA identity-rescale guards are in review. Raw-output device A/B and whole-round gain are unmeasured;
+
 ## The table
 
 Each cell is one of these:

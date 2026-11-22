@@ -1,3 +1,6 @@
+#ifndef TF_METAL_SOFTMAX_IDENTITY_GUARD
+#define TF_METAL_SOFTMAX_IDENTITY_GUARD 1
+#endif
 namespace tfq6 {
 
 // x (TM 16-row fragments) times a bf16 [64 rows, K] block, 64 deep a step: thread t copies row t / 2's half t % 2.
@@ -162,19 +165,21 @@ inline void a_fold(thread const frag<float>& f, thread float (&r)[2]) {
       TF_UNROLL
       for (short e = 0; e < 8; e++) s[f][e] = fast::exp2(s[f][e] - top_new[e >> 2]);
     }
+    bool same[2];
     float scale_old[2];
     TF_UNROLL
     for (short hh = 0; hh < 2; hh++) {
-      scale_old[hh] = fast::exp2(top[hh] - top_new[hh]);
+      same[hh] = TF_METAL_SOFTMAX_IDENTITY_GUARD && top_new[hh] == top[hh] && isfinite(top[hh]);
+      scale_old[hh] = same[hh] ? 1.0f : fast::exp2(top[hh] - top_new[hh]);
       top[hh] = top_new[hh];
-      total[hh] = total[hh] * scale_old[hh];
+      total[hh] = (same[hh] && isfinite(total[hh])) ? total[hh] : total[hh] * scale_old[hh];
     }
     a_fold<false>(s[0], total);
     a_fold<false>(s[1], total);
     TF_UNROLL
     for (short i = 0; i < D / 16; i++) {
       TF_UNROLL
-      for (short e = 0; e < 8; e++) acc[i][e] = acc[i][e] * scale_old[e >> 2];
+      for (short e = 0; e < 8; e++) if (!same[e >> 2] || !isfinite(acc[i][e])) acc[i][e] = acc[i][e] * scale_old[e >> 2];
     }
     TF_UNROLL
     for (short d = 0; d < D / 16; d += 2) {

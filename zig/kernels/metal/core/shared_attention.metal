@@ -1,3 +1,6 @@
+#ifndef TF_METAL_SOFTMAX_IDENTITY_GUARD
+#define TF_METAL_SOFTMAX_IDENTITY_GUARD 1
+#endif
 #include <metal_stdlib>
 using namespace metal;
 
@@ -37,23 +40,26 @@ inline void tf_context_row(const device bfloat* Q, const device bfloat* K, const
     }
     // the maximum after each key and both weights come from the scores alone
     float old_weight[TF_TILE], weight[TF_TILE];
+    bool same[TF_TILE];
     float next = maximum;
     for (uint t = 0; t < TF_TILE; ++t) {
       old_weight[t] = 0.0f;
+      same[t] = false;
       weight[t] = 0.0f;
       if (live[t]) {
         const float before = next;
         next = max(next, score[t]);
-        old_weight[t] = before == -INFINITY ? 0.0f : precise::exp(before - next);
+        same[t] = TF_METAL_SOFTMAX_IDENTITY_GUARD && next == before && isfinite(before);
+        old_weight[t] = before == -INFINITY ? 0.0f : (same[t] ? 1.0f : precise::exp(before - next));
         weight[t] = precise::exp(score[t] - next);
       }
     }
     maximum = next;
     for (uint t = 0; t < TF_TILE; ++t) {
       if (live[t]) {
-        total = fma(total, old_weight[t], weight[t]);
+        total = (same[t] && isfinite(total + weight[t])) ? total + weight[t] : fma(total, old_weight[t], weight[t]);
         for (uint d = 0; d < TF_D / 32; ++d)
-          out[d] = fma(out[d], old_weight[t], weight[t] * value[t][d]);
+          out[d] = (same[t] && isfinite(out[d] + weight[t] * value[t][d])) ? out[d] + weight[t] * value[t][d] : fma(out[d], old_weight[t], weight[t] * value[t][d]);
       }
     }
   }
@@ -100,10 +106,11 @@ inline void tf_context_row(const device bfloat* Q, const device bfloat* K, const
       for (uint d = 0; d < TF_D / 32; ++d) dot = fma(q[g][d], k[d], dot);
       const float score = simd_sum(dot) * scale;
       const float next = max(maximum[g], score);
-      const float old_weight = maximum[g] == -INFINITY ? 0.0f : exp(maximum[g] - next);
+      const bool same = TF_METAL_SOFTMAX_IDENTITY_GUARD && next == maximum[g] && isfinite(maximum[g]);
+      const float old_weight = maximum[g] == -INFINITY ? 0.0f : (same ? 1.0f : exp(maximum[g] - next));
       const float weight = exp(score - next);
-      total[g] = fma(total[g], old_weight, weight);
-      for (uint d = 0; d < TF_D / 32; ++d) out[g][d] = fma(out[g][d], old_weight, weight * v[d]);
+      total[g] = (same && isfinite(total[g] + weight)) ? total[g] + weight : fma(total[g], old_weight, weight);
+      for (uint d = 0; d < TF_D / 32; ++d) out[g][d] = (same && isfinite(out[g][d] + weight * v[d])) ? out[g][d] + weight * v[d] : fma(out[g][d], old_weight, weight * v[d]);
       maximum[g] = next;
     }
   }
@@ -132,9 +139,10 @@ inline void tf_context_row(const device bfloat* Q, const device bfloat* K, const
   for (uint c = 0; c < chunks; ++c) {
     const device float* p = first + c * step;
     if (p[TF_D] == -INFINITY) continue;
-    const float w = exp(p[TF_D] - maximum);
-    total = fma(p[TF_D + 1], w, total);
-    for (uint d = 0; d < TF_D / 32; ++d) out[d] = fma(p[lane + d * 32], w, out[d]);
+    const bool same = TF_METAL_SOFTMAX_IDENTITY_GUARD && p[TF_D] == maximum && isfinite(p[TF_D]);
+    const float w = same ? 1.0f : exp(p[TF_D] - maximum);
+    total = (same && isfinite(p[TF_D + 1] + total)) ? p[TF_D + 1] + total : fma(p[TF_D + 1], w, total);
+    for (uint d = 0; d < TF_D / 32; ++d) out[d] = (same && isfinite(p[lane + d * 32] + out[d])) ? p[lane + d * 32] + out[d] : fma(p[lane + d * 32], w, out[d]);
   }
   const size_t qi = ((size_t)row * TF_QH + head) * TF_D;
   for (uint d = 0; d < TF_D / 32; ++d) O[qi + lane + d * 32] = TF_OUT(total == 0.0f ? 0.0f : out[d] / total);

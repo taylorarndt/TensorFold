@@ -3,6 +3,7 @@ pub const delta_slots_ref = @import("contract/delta_slots_ref.zig");
 pub const delta_slots_records = @import("contract/delta_slots_records.zig");
 pub const spec = @import("contract/contract.zig");
 pub const gates = @import("contract/gates.zig");
+pub const identity = @import("contract/identity.zig");
 pub const attention_pv = @import("contract/attention_pv.zig");
 pub const rows = @import("contract/rows.zig");
 pub const reference_threads = @import("contract/reference_threads.zig");

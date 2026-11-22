@@ -1,3 +1,6 @@
+#ifndef TF_METAL_SOFTMAX_IDENTITY_GUARD
+#define TF_METAL_SOFTMAX_IDENTITY_GUARD 1
+#endif
 // MiniMax H3 / FastH3 on Metal: tile-routed attention in bf16 on the tensor units, fp32 sums and an online softmax.
 
 // softmax(q k^T) v over a query tile's key tiles in bf16, fp32 sums and an online softmax. [query tiles, H] of 256.
@@ -78,10 +81,10 @@
     float next = top;
     H3_UNROLL
     for (ushort j = 0; j < TPR; j++) next = max(next, tops[row * TPR + j]);
-    // a tile whose keys are all padding leaves next at -inf; its weights are zero and nothing shrinks
-    const float shrink = next == -INFINITY ? 1.0f : exp(top - next);
+    const bool same = TF_METAL_SOFTMAX_IDENTITY_GUARD && next == top && isfinite(top);
+    const float shrink = next == -INFINITY ? 1.0f : (same ? 1.0f : exp(top - next));
     if (tid % TPR == 0) fac[row] = shrink;
-    total *= shrink;
+    if (!same || !isfinite(total)) total *= shrink;
     top = next;
     H3_UNROLL
     for (ushort j = 0; j < C1; j++) {
@@ -91,7 +94,7 @@
     }
     threadgroup_barrier(mem_flags::mem_threadgroup);
     H3_UNROLL
-    for (ushort i = 0; i < C2; i++) out[i] *= fac[orow[i]];
+    for (ushort i = 0; i < C2; i++) if (fac[orow[i]] != 1.0f) out[i] *= fac[orow[i]];
     auto vb = v.slice<D, KEYS>(0, k0);
     op2.run(p, vb, out);
     threadgroup_barrier(mem_flags::mem_threadgroup);

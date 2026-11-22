@@ -19,6 +19,8 @@ pub const Kernel = struct {
     ctx: *anyopaque,
     vt: *const VTable,
     control: ?Gate = null,
+    /// Its test implements contract.identity's reserved finite/adversarial seed plant.
+    adversarial: bool = false,
 };
 
 /// The hooks a kernel's test gives the harness; the harness owns no device memory.

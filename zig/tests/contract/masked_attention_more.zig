@@ -11,24 +11,28 @@ const sparse = @import("masked_attention_sparse.zig");
 pub const Kind = enum { glm_dense, glm_nax64, glm_nax32, glm_padding, glm_split, glm_indexed64, glm_indexed32, glm_dsa, kimi, step_full_nax, step_sliding_nax, step_sparse_nax, step_full_scalar, step_sliding_scalar, step_sparse_scalar, qwen4_dense, qwen4_sparse, drama, shared, shared_split, qwen35_pages, lfm3, lfm3_sliding, step_padding_nax, step_padding_scalar, deepseek_pre, h3_padding };
 pub fn geometry(k: Kind) data.Geometry {
     return switch (k) {
-        .glm_nax32, .glm_indexed32 => .{ .heads = 32, .kv = 1, .dim = 512, .latent = true },
-        .glm_padding => .{ .heads = 64, .kv = 1, .dim = 512, .latent = true, .poison_key = 0, .skip_zero_first = true },
-        .glm_dense, .glm_nax64, .glm_split, .glm_indexed64 => .{ .heads = 64, .kv = 1, .dim = 512, .latent = true },
-        .glm_dsa => .{ .heads = 32, .kv = 1, .dim = 512, .latent = true },
-        .kimi => .{ .heads = 96, .kv = 1, .dim = 512, .latent = true },
+        .glm_nax32, .glm_indexed32 => .{ .heads = 32, .kv = 1, .dim = 512, .latent = true, .scale = 0.0625 },
+        .glm_padding => .{ .heads = 64, .kv = 1, .dim = 512, .latent = true, .poison_key = 0, .skip_zero_first = true, .scale = 0.0625 },
+        .glm_dense, .glm_nax64, .glm_split, .glm_indexed64 => .{ .heads = 64, .kv = 1, .dim = 512, .latent = true, .scale = 0.0625 },
+        .glm_dsa => .{ .heads = 32, .kv = 1, .dim = 512, .latent = true, .scale = 0.0625 },
+        .kimi => .{ .heads = 96, .kv = 1, .dim = 512, .latent = true, .scale = 0.0625 },
         .step_full_nax, .step_full_scalar => .{ .heads = 64, .kv = 4, .dim = 192 },
         .step_sliding_nax, .step_sliding_scalar => .{ .heads = 64, .kv = 4, .dim = 192, .cap = 2560, .window = 512, .ring = 2560 },
         .step_padding_nax, .step_padding_scalar => .{ .heads = 64, .kv = 4, .dim = 192, .cap = 8192, .first = 4104, .selected_prefix = 4096, .selected_shift_first = 8, .poison_key = 0 },
         .step_sparse_nax, .step_sparse_scalar => .{ .heads = 64, .kv = 4, .dim = 192, .cap = 8192, .first = 4104, .selected_prefix = 4096 },
-        .qwen4_dense, .qwen4_sparse => .{ .heads = 24, .kv = 4, .dim = 256 },
+        .qwen4_dense, .qwen4_sparse => .{ .heads = 24, .kv = 4, .dim = 256, .scale = 0.0625 },
         .drama => .{ .heads = 16, .kv = 2, .dim = 256, .gated = true },
-        .shared, .shared_split => .{ .heads = 16, .kv = 4, .dim = 128 },
-        .qwen35_pages => .{ .heads = 8, .kv = 2, .dim = 256, .cache = .head, .query = .head },
+        .shared, .shared_split => .{ .heads = 16, .kv = 4, .dim = 128, .scale = 0.125, .identity_all_masked = true },
+        .qwen35_pages => .{ .heads = 8, .kv = 2, .dim = 256, .cache = .head, .query = .head, .scale = 0.0625 },
         .lfm3 => .{ .heads = 16, .kv = 4, .dim = 128, .cache = .head },
         .lfm3_sliding => .{ .heads = 16, .kv = 4, .dim = 128, .cache = .head, .window = 2048 },
         .deepseek_pre => .{ .heads = 64, .kv = 1, .dim = 512, .window = 128, .latent = true, .sink = true },
         .h3_padding => .{ .heads = 2, .kv = 2, .dim = 128, .cap = 1024, .cache = .head },
     };
+}
+pub fn identitySupported(k: Kind) bool {
+    // H3's fixture has a special 17-key reference rather than causal token rows.
+    return k != .h3_padding;
 }
 pub fn label(k: Kind) []const u8 {
     return @tagName(k);
@@ -48,6 +52,12 @@ pub fn finding(k: Kind) []const u8 {
         .step_full_nax, .step_sliding_nax, .step_sparse_nax => "#1009: zero residual probability parts multiply visible Inf, giving NaN instead of the IEEE infinity",
         .h3_padding => "#1009: V in a tile's SIZES padding enters P x V at zero probability and gives a hidden output NaN",
         else => unreachable,
+    };
+}
+pub fn portable(k: Kind) bool {
+    return switch (k) {
+        .glm_dense, .glm_dsa, .kimi, .step_full_scalar, .step_sliding_scalar, .step_sparse_scalar, .step_padding_scalar, .qwen4_dense, .qwen4_sparse, .drama, .shared, .shared_split, .qwen35_pages, .lfm3, .lfm3_sliding, .deepseek_pre => true,
+        else => false,
     };
 }
 pub fn output(k: Kind) @import("contract").spec.Elem {

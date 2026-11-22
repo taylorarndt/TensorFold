@@ -1,3 +1,6 @@
+#ifndef TF_METAL_SOFTMAX_IDENTITY_GUARD
+#define TF_METAL_SOFTMAX_IDENTITY_GUARD 1
+#endif
 // MOSS-Image's prompt encoder (Qwen3.5) after moss_image.metal, each step rounded where the publisher's torch rounds.
 
 struct MeRows {
@@ -87,9 +90,10 @@ struct MeAttn {
     const ulong at = (ulong(kvh) * p.rows + j) * 256 + d;
     const float s = mi_sum(q * float(K[at]), part, 256, lane, sg) * p.scale;
     const float top = max(m, s);
-    const float old = metal::precise::exp(m - top), e = metal::precise::exp(s - top);
-    l = l * old + e;
-    acc = acc * old + e * float(V[at]);
+    const bool same = TF_METAL_SOFTMAX_IDENTITY_GUARD && top == m && isfinite(m);
+    const float old = same ? 1.0f : metal::precise::exp(m - top), e = metal::precise::exp(s - top);
+    l = ((same && isfinite(l)) ? l : l * old) + e;
+    acc = ((same && isfinite(acc)) ? acc : acc * old) + e * float(V[at]);
     m = top;
   }
   O[(ulong(t) * p.heads + h) * 256 + d] = bfloat(acc / l);

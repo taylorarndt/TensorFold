@@ -1,3 +1,6 @@
+#ifndef TF_METAL_SOFTMAX_IDENTITY_GUARD
+#define TF_METAL_SOFTMAX_IDENTITY_GUARD 1
+#endif
 // Decode attention partials over 64-key tiles, SG tiles a threadgroup; the kernel list adds one instance a key.
 #include <metal_stdlib>
 using namespace metal;
@@ -68,8 +71,9 @@ template <int G, int D, int SG, int CK, int TK>
     x0 = max(x0, simd_shuffle_xor(x0, 1)); x0 = max(x0, simd_shuffle_xor(x0, 8));
     x1 = max(x1, simd_shuffle_xor(x1, 1)); x1 = max(x1, simd_shuffle_xor(x1, 8));
     const float nm0 = max(m0, x0), nm1 = max(m1, x1);
-    const float f0 = (x0 == -INFINITY) ? 1.0f : fast::exp(m0 - nm0);
-    const float f1 = (x1 == -INFINITY) ? 1.0f : fast::exp(m1 - nm1);
+    const bool same0 = TF_METAL_SOFTMAX_IDENTITY_GUARD && nm0 == m0 && isfinite(m0), same1 = TF_METAL_SOFTMAX_IDENTITY_GUARD && nm1 == m1 && isfinite(m1);
+    const float f0 = (x0 == -INFINITY || same0) ? 1.0f : fast::exp(m0 - nm0);
+    const float f1 = (x1 == -INFINITY || same1) ? 1.0f : fast::exp(m1 - nm1);
     float p[TK / 2];
     for (int i = 0; i < TK / 2; i++) p[i] = (s[i] == -INFINITY) ? 0.0f : fast::exp(s[i] - ((i & 4) ? nm1 : nm0));
     float y0 = 0.0f, y1 = 0.0f;
@@ -79,12 +83,12 @@ template <int G, int D, int SG, int CK, int TK>
     }
     y0 += simd_shuffle_xor(y0, 1); y0 += simd_shuffle_xor(y0, 8);
     y1 += simd_shuffle_xor(y1, 1); y1 += simd_shuffle_xor(y1, 8);
-    if (x0 != -INFINITY) { l0 = l0 * f0 + y0; m0 = nm0; }
-    if (x1 != -INFINITY) { l1 = l1 * f1 + y1; m1 = nm1; }
+    if (x0 != -INFINITY) { l0 = ((same0 && isfinite(l0)) ? l0 : l0 * f0) + y0; m0 = nm0; }
+    if (x1 != -INFINITY) { l1 = ((same1 && isfinite(l1)) ? l1 : l1 * f1) + y1; m1 = nm1; }
     auto Pc = opS.template get_destination_cooperative_tensor<decltype(aQ), decltype(bK), half>();
     for (int i = 0; i < TK / 2; i++) Pc[i] = half(p[i]);
     auto Pin = opO.template get_left_input_cooperative_tensor<half, bfloat, float>(Pc);
-    for (int i = 0; i < 64; i++) { const float f = (i & 4) ? f1 : f0; Olo[i] *= f; }
+    for (int i = 0; i < 64; i++) { const bool same = (i & 4) ? same1 : same0; const float f = (i & 4) ? f1 : f0; if (!same || !isfinite(Olo[i])) Olo[i] *= f; }
     auto bVlo = tV.slice(0, kt);
     opO.run(Pin, bVlo, Olo);
 

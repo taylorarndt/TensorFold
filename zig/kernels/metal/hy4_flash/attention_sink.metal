@@ -1,3 +1,6 @@
+#ifndef TF_METAL_SOFTMAX_IDENTITY_GUARD
+#define TF_METAL_SOFTMAX_IDENTITY_GUARD 1
+#endif
 // Finish a head's online softmax with its learned, zero-value sink.
 #include <metal_stdlib>
 using namespace metal;
@@ -23,8 +26,9 @@ kernel void tf_hy4_finish_attention(
 
     const float sink = sinks[row_head % args.heads];
     const float top = max(maxima[row_head], sink);
-    const float prior = precise::exp(maxima[row_head] - top);
-    const float denominator = mass[row_head] * prior + precise::exp(sink - top);
+    const bool same = TF_METAL_SOFTMAX_IDENTITY_GUARD && top == maxima[row_head] && isfinite(maxima[row_head]);
+    const float prior = same ? 1.0f : precise::exp(maxima[row_head] - top);
+    const float denominator = ((same && isfinite(mass[row_head])) ? mass[row_head] : mass[row_head] * prior) + precise::exp(sink - top);
     const ulong offset = ulong(row_head) * args.width + column;
-    output[offset] = numerator[offset] * prior / denominator;
+    output[offset] = ((same && isfinite(numerator[offset])) ? numerator[offset] : numerator[offset] * prior) / denominator;
 }

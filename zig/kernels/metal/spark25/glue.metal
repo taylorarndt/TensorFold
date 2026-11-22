@@ -1,3 +1,6 @@
+#ifndef TF_METAL_SOFTMAX_IDENTITY_GUARD
+#define TF_METAL_SOFTMAX_IDENTITY_GUARD 1
+#endif
 // Spark2.5's glue at the reference's rounding points (its PyTorch code in bf16): an fp32 residual, fp32 norms and rope.
 #include <metal_stdlib>
 using namespace metal;
@@ -177,10 +180,9 @@ struct sp_vec_args { uint rows, pos, heads, groups, ring, window, blocks, chunk,
       score[u] = live ? sc : -INFINITY;
     }
     const float peak = max(max(top, max(score[0], score[1])), max(score[2], score[3]));
-    const float rescale = fast::exp(top - peak);
-    mass *= rescale;
-    acc0 *= rescale;
-    acc1 *= rescale;
+    const bool same = TF_METAL_SOFTMAX_IDENTITY_GUARD && peak == top && isfinite(top);
+    const float rescale = same ? 1.0f : fast::exp(top - peak);
+    if (!same || !isfinite(mass) || !all(isfinite(acc0)) || !all(isfinite(acc1))) { mass *= rescale; acc0 *= rescale; acc1 *= rescale; }
     TF_UNROLL_4
     for (uint u = 0; u < 4; ++u) {
       const float w = fast::exp(score[u] - peak);
@@ -213,14 +215,15 @@ struct sp_vec_args { uint rows, pos, heads, groups, ring, window, blocks, chunk,
   for (uint b = lane0; b < a.blocks; b += 32) top = max(top, ms[b]);
   top = simd_max(top);
   float total = 0.0f;
-  for (uint b = lane0; b < a.blocks; b += 32) total += ls[b] > 0.0f ? ls[b] * fast::exp(ms[b] - top) : 0.0f;
+  for (uint b = lane0; b < a.blocks; b += 32) total += ls[b] > 0.0f ? (TF_METAL_SOFTMAX_IDENTITY_GUARD && ms[b] == top && isfinite(ms[b]) && isfinite(ls[b]) ? ls[b] : ls[b] * fast::exp(ms[b] - top)) : 0.0f;
   total = simd_sum(total);
   float acc[PER];
   for (uint j = 0; j < PER; ++j) acc[j] = 0.0f;
   for (uint b = sg0; b < a.blocks; b += 32) {
     if (ls[b] <= 0.0f) continue;
-    const float f = fast::exp(ms[b] - top);
-    for (uint j = 0; j < PER; ++j) acc[j] += f * PO[(at * a.blocks + b) * DH + PER * lane + j];
+    const bool same = TF_METAL_SOFTMAX_IDENTITY_GUARD && ms[b] == top && isfinite(ms[b]);
+    const float f = same ? 1.0f : fast::exp(ms[b] - top);
+    for (uint j = 0; j < PER; ++j) acc[j] += (same && isfinite(PO[(at * a.blocks + b) * DH + PER * lane + j])) ? PO[(at * a.blocks + b) * DH + PER * lane + j] : f * PO[(at * a.blocks + b) * DH + PER * lane + j];
   }
   for (uint j = 0; j < PER; ++j) {
     merged[lane * 32 + sg] = acc[j];

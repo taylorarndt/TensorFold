@@ -1,3 +1,6 @@
+#ifndef TF_METAL_SOFTMAX_IDENTITY_GUARD
+#define TF_METAL_SOFTMAX_IDENTITY_GUARD 1
+#endif
 // Decode attention over a bf16 KV cache (head dim 128), bit-identical to MLX 0.32.3's sdpa_vector kernels.
 #include <metal_stdlib>
 using namespace metal;
@@ -11,11 +14,12 @@ template <int PER>
 inline void tf_softmax_step(float score, thread float& top, thread float& mass, thread float* acc,
                             const device bfloat* v) {
   const float peak = max(top, score);
-  const float rescale = fast::exp(top - peak);
+  const bool same = TF_METAL_SOFTMAX_IDENTITY_GUARD && peak == top && isfinite(top);
+  const float rescale = same ? 1.0f : fast::exp(top - peak);
   const float weight = fast::exp(score - peak);
   top = peak;
-  mass = mass * rescale + weight;
-  for (int j = 0; j < PER; ++j) acc[j] = acc[j] * rescale + weight * v[j];
+  mass = ((same && isfinite(mass)) ? mass : mass * rescale) + weight;
+  for (int j = 0; j < PER; ++j) acc[j] = ((same && isfinite(acc[j])) ? acc[j] : acc[j] * rescale) + weight * v[j];
 }
 
 // sdpa_vector: simdgroup s takes keys s, s + 32, ..., lane l dims 4l..4l+3; 32 partials merge by lane transposition.
@@ -51,12 +55,14 @@ inline void tf_sdpa_one_pass(const device bfloat* q, const device bfloat* k, con
   }
   threadgroup_barrier(mem_flags::mem_threadgroup);
   const float mine = tops[lane];
-  const float rescale = fast::exp(mine - simd_max(mine));
-  const float total = simd_sum(masses[lane] * rescale);
+  const float peak = simd_max(mine);
+  const bool same = TF_METAL_SOFTMAX_IDENTITY_GUARD && mine == peak && isfinite(mine);
+  const float rescale = same ? 1.0f : fast::exp(mine - peak);
+  const float total = simd_sum((same && isfinite(masses[lane])) ? masses[lane] : masses[lane] * rescale);
   for (int j = 0; j < 4; ++j) {
     merged[lane * 32 + sg] = acc[j];
     threadgroup_barrier(mem_flags::mem_threadgroup);
-    acc[j] = simd_sum(merged[sg * 32 + lane] * rescale);
+    acc[j] = simd_sum((same && isfinite(merged[sg * 32 + lane])) ? merged[sg * 32 + lane] : merged[sg * 32 + lane] * rescale);
     acc[j] = total == 0 ? acc[j] : (acc[j] / total);
     threadgroup_barrier(mem_flags::mem_threadgroup);
   }
@@ -136,11 +142,12 @@ inline void tf_sdpa_blocks_gqa16(const device bfloat* q, const device bfloat* k,
       for (int j = 0; j < 4; ++j) score += qv[h][j] * kr[j];
       score = simd_sum(score);
       const float peak = max(top[h], score);
-      const float rescale = fast::exp(top[h] - peak);
+      const bool same = TF_METAL_SOFTMAX_IDENTITY_GUARD && peak == top[h] && isfinite(top[h]);
+      const float rescale = same ? 1.0f : fast::exp(top[h] - peak);
       const float weight = fast::exp(score - peak);
       top[h] = peak;
-      mass[h] = mass[h] * rescale + weight;
-      for (int j = 0; j < 4; ++j) acc[h][j] = acc[h][j] * rescale + weight * vr[j];
+      mass[h] = ((same && isfinite(mass[h])) ? mass[h] : mass[h] * rescale) + weight;
+      for (int j = 0; j < 4; ++j) acc[h][j] = ((same && isfinite(acc[h][j])) ? acc[h][j] : acc[h][j] * rescale) + weight * vr[j];
     }
   }
   for (int h = 0; h < 2; ++h) {
@@ -157,9 +164,10 @@ inline void tf_sdpa_blocks_gqa16(const device bfloat* q, const device bfloat* k,
   for (int s = 0; s < 2; ++s) peak = max(peak, mx_sh[g * 2 + s]);
   float denom = 0, out[4] = {0.0f, 0.0f, 0.0f, 0.0f};
   for (int s = 0; s < 2; ++s) {
-    const float w = se_sh[g * 2 + s] * fast::exp(mx_sh[g * 2 + s] - peak);
+    const bool same = TF_METAL_SOFTMAX_IDENTITY_GUARD && mx_sh[g * 2 + s] == peak && isfinite(mx_sh[g * 2 + s]);
+    const float w = (same && isfinite(se_sh[g * 2 + s])) ? se_sh[g * 2 + s] : se_sh[g * 2 + s] * fast::exp(mx_sh[g * 2 + s] - peak);
     denom += w;
-    for (int j = 0; j < 4; ++j) out[j] += w * o_sh[(g * 2 + s) * 128 + 4 * lane + j];
+    for (int j = 0; j < 4; ++j) out[j] += (same && isfinite(se_sh[g * 2 + s] * o_sh[(g * 2 + s) * 128 + 4 * lane + j])) ? se_sh[g * 2 + s] * o_sh[(g * 2 + s) * 128 + 4 * lane + j] : w * o_sh[(g * 2 + s) * 128 + 4 * lane + j];
   }
   const int slot = (base + g) * blocks + block;
   for (int j = 0; j < 4; ++j) part[long(slot) * 128 + 4 * lane + j] = static_cast<bfloat>(out[j]);
@@ -181,16 +189,18 @@ inline void tf_sdpa_merge(const device bfloat* part, const device float* sums, c
   top = simd_max(top);
   float total = 0.0f;
   for (int b = 0; b < blocks / 32; ++b) {
-    const float f = fast::exp(ms[lane + 32 * b] - top);
-    total += f * ss[lane + 32 * b];
+    const bool same = TF_METAL_SOFTMAX_IDENTITY_GUARD && ms[lane + 32 * b] == top && isfinite(ms[lane + 32 * b]);
+    const float f = same ? 1.0f : fast::exp(ms[lane + 32 * b] - top);
+    total += (same && isfinite(ss[lane + 32 * b])) ? ss[lane + 32 * b] : f * ss[lane + 32 * b];
   }
   total = simd_sum(total);
   float acc[4] = {0.0f, 0.0f, 0.0f, 0.0f};
   const device bfloat* p = part + (long(at) * blocks + sg) * 128 + 4 * lane;
   const device float* mb = ms + sg;
   for (int b = 0; b < blocks / 32; ++b, p += 32 * 128, mb += 32) {
-    const float f = fast::exp(mb[0] - top);
-    for (int j = 0; j < 4; ++j) acc[j] += f * static_cast<float>(p[j]);
+    const bool same = TF_METAL_SOFTMAX_IDENTITY_GUARD && mb[0] == top && isfinite(mb[0]);
+    const float f = same ? 1.0f : fast::exp(mb[0] - top);
+    for (int j = 0; j < 4; ++j) acc[j] += (same && isfinite(static_cast<float>(p[j]))) ? static_cast<float>(p[j]) : f * static_cast<float>(p[j]);
   }
   for (int j = 0; j < 4; ++j) {
     merged[lane * 32 + sg] = acc[j];

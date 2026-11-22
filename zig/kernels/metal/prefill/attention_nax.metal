@@ -1,3 +1,6 @@
+#ifndef TF_METAL_SOFTMAX_IDENTITY_GUARD
+#define TF_METAL_SOFTMAX_IDENTITY_GUARD 1
+#endif
 // Causal prefill attention: MLX NAX arithmetic by default; TF_ATTN_PV_FP32 opts into full-float P x V on M5.
 #include <metal_stdlib>
 using namespace metal;
@@ -44,9 +47,6 @@ inline void attention_pv(thread frag<float>& lo, thread frag<float>& hi, thread 
       lo[4 + c] = fma(p1, a, lo[4 + c]); hi[4 + c] = fma(p1, b, hi[4 + c]);
     }
   }
-#else
-  mma_16x32<false, false>(lo, hi, p, v0, v1);
-#endif
 }
 
 // One 64-query block of one head, online softmax over 32-key blocks; P holds the ATTN_PARAMS fields, F[0] the scale.
@@ -137,21 +137,21 @@ inline void attention_nax(const device T* Q, const device T* K, const device T* 
         s[f][e] = fast::exp2(s[f][e] - top_new[e >> 2]);
       }
     }
+    bool same[2];
     float scale_old[2];
     TF_UNROLL
     for (short h = 0; h < 2; h++) {
-      scale_old[h] = fast::exp2(top[h] - top_new[h]);
+      same[h] = TF_METAL_SOFTMAX_IDENTITY_GUARD && top_new[h] == top[h] && isfinite(top[h]);
+      scale_old[h] = same[h] ? 1.0f : fast::exp2(top[h] - top_new[h]);
       top[h] = top_new[h];
-      total[h] = total[h] * scale_old[h];
+      total[h] = (same[h] && isfinite(total[h])) ? total[h] : total[h] * scale_old[h];
     }
     row_fold<false>(s[0], total);
     row_fold<false>(s[1], total);
     TF_UNROLL
     for (short i = 0; i < 8; i++) {
       TF_UNROLL
-      for (short e = 0; e < 8; e++) {
-        acc[i][e] = acc[i][e] * scale_old[e >> 2];
-      }
+      for (short e = 0; e < 8; e++) if (!same[e >> 2] || !isfinite(acc[i][e])) acc[i][e] = acc[i][e] * scale_old[e >> 2];
     }
     simdgroup_barrier(mem_flags::mem_none);
 

@@ -1,3 +1,6 @@
+#ifndef TF_METAL_SOFTMAX_IDENTITY_GUARD
+#define TF_METAL_SOFTMAX_IDENTITY_GUARD 1
+#endif
 // Flash Next prompt sparse attention: indexer block scores, each row over selected blocks and tail (all keys if short).
 #include "../nax.h"
 using namespace tfp;
@@ -105,7 +108,6 @@ inline float bsig(float x) { return float(bfloat(1.0f / (1.0f + metal::exp(-x)))
       const int j = j0 + 16 * (i >> 2) + home.x + TF_COL(i & 3);
       kq[i] = j < n ? (sparse ? ids[j] : j) : 0;
     }
-#endif
     // this simdgroup's dims of q . k for the 32 keys
     frag<float> s[2] = {frag<float>(0), frag<float>(0)};
     TF_UNROLL
@@ -117,11 +119,6 @@ inline float bsig(float x) { return float(bfloat(1.0f / (1.0f + metal::exp(-x)))
         const int c = 16 * d + home.y + (e >> 2) * 8;
         k0[e] = Kh[long(kq[e & 3]) * D + c];
         k1[e] = Kh[long(kq[4 + (e & 3)]) * D + c];
-#else
-        const int c = 16 * d + home.x + (e & 3);
-        k0[e] = Kh[long(key[(e >> 2)]) * D + c];
-        k1[e] = Kh[long(key[2 + (e >> 2)]) * D + c];
-#endif
       }
       mma_16x32<false, true>(s[0], s[1], q[d], k0, k1);
     }
@@ -149,18 +146,20 @@ inline float bsig(float x) { return float(bfloat(1.0f / (1.0f + metal::exp(-x)))
       TF_UNROLL
       for (short e = 0; e < 8; e++) s[f][e] = fast::exp2(s[f][e] - top_new[e >> 2]);
     }
+    bool same[2];
     float keep[2];
     TF_UNROLL
     for (short hh = 0; hh < 2; hh++) {
-      keep[hh] = fast::exp2(top[hh] - top_new[hh]);
+      same[hh] = TF_METAL_SOFTMAX_IDENTITY_GUARD && top_new[hh] == top[hh] && isfinite(top[hh]);
+      keep[hh] = same[hh] ? 1.0f : fast::exp2(top[hh] - top_new[hh]);
       top[hh] = top_new[hh];
-      total[hh] = total[hh] * keep[hh];
+      total[hh] = (same[hh] && isfinite(total[hh])) ? total[hh] : total[hh] * keep[hh];
     }
     tfa::row_fold<false>(s[0], s[1], total);
     TF_UNROLL
     for (short i = 0; i < DS / 16; i++) {
       TF_UNROLL
-      for (short e = 0; e < 8; e++) acc[i][e] = acc[i][e] * keep[e >> 2];
+      for (short e = 0; e < 8; e++) if (!same[e >> 2] || !isfinite(acc[i][e])) acc[i][e] = acc[i][e] * keep[e >> 2];
     }
     // acc (16 x 64) += p (16 x 32 keys) * v (32 keys x 64 dims)
     TF_UNROLL

@@ -1,3 +1,6 @@
+#ifndef TF_METAL_SOFTMAX_IDENTITY_GUARD
+#define TF_METAL_SOFTMAX_IDENTITY_GUARD 1
+#endif
 #include <metal_stdlib>
 using namespace metal;
 typedef bfloat bfloat16_t;
@@ -193,9 +196,10 @@ inline float qgroup_doth(const device uint32_t* w, float scale, float bias, cons
   float total = 0.0f, acc = 0.0f;
   for (int k = 0; k < P; k++) {
     const float mk = PM[(at + k) * 2];
-    const float w = mk == -INFINITY ? 0.0f : metal::exp(mk - top);
-    total = fma(PM[(at + k) * 2 + 1], w, total);
-    acc = fma(PO[(at + k) * D + d], w, acc);
+    const bool same = TF_METAL_SOFTMAX_IDENTITY_GUARD && mk == top && isfinite(mk);
+    const float w = mk == -INFINITY ? 0.0f : (same ? 1.0f : metal::exp(mk - top));
+    total = (same && isfinite(PM[(at + k) * 2 + 1] + total)) ? PM[(at + k) * 2 + 1] + total : fma(PM[(at + k) * 2 + 1], w, total);
+    acc = (same && isfinite(PO[(at + k) * D + d] + acc)) ? PO[(at + k) * D + d] + acc : fma(PO[(at + k) * D + d], w, acc);
   }
   const float g = float(GP[r * PW + h * 2 * D + D + d]);
   OUT[(size_t(r) * H + h) * D + d] = bfloat(float(bfloat(acc / total)) * bsig(g));

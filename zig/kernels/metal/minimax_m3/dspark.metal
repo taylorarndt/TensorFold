@@ -1,3 +1,6 @@
+#ifndef TF_METAL_SOFTMAX_IDENTITY_GUARD
+#define TF_METAL_SOFTMAX_IDENTITY_GUARD 1
+#endif
 // MiniMax-M3.1-Flash's DSpark drafter and the target's taps for it, at ref/dspark.py's rounding points.
 #include <metal_stdlib>
 using namespace metal;
@@ -108,9 +111,9 @@ struct mm_dvec_args { uint rows, pos0, heads, groups, blocks, first, hi, window,
       score[u] = live ? sc : -INFINITY;
     }
     const float peak = max(max(top, max(score[0], score[1])), max(score[2], score[3]));
-    const float rescale = fast::exp(top - peak);
-    mass *= rescale;
-    acc *= rescale;
+    const bool same = TF_METAL_SOFTMAX_IDENTITY_GUARD && peak == top && isfinite(top);
+    const float rescale = same ? 1.0f : fast::exp(top - peak);
+    if (!same || !isfinite(mass) || !all(isfinite(acc))) { mass *= rescale; acc *= rescale; }
     TF_UNROLL_4
     for (uint u = 0; u < 4; ++u) {
       const float w = fast::exp(score[u] - peak);

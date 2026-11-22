@@ -1,3 +1,6 @@
+#ifndef TF_METAL_SOFTMAX_IDENTITY_GUARD
+#define TF_METAL_SOFTMAX_IDENTITY_GUARD 1
+#endif
 // GLM's DFlash2 drafter attention: a block's rows over the rolling K/V ring and their own keys, a key a lane.
 #include <metal_stdlib>
 using namespace metal;
@@ -11,10 +14,6 @@ using namespace metal;
 #if TF_D == 128
 typedef float4 glm_vec;
 typedef bfloat4 glm_bvec;
-#else
-typedef float2 glm_vec;
-typedef bfloat2 glm_bvec;
-#endif
 
 // Rows: streams' blocks; stream s's keys: its context at ring slots (at + key) % window, then its own KO/VO rows.
 struct glm_draft_args { uint rows, block, streams, mask_stride, scale_bits, window, chunks, pad; };
@@ -83,10 +82,11 @@ inline float glm_max(float x, float y) {
       // a NaN score keeps the maximum NaN, so the merge cannot skip its chunk as empty
       const bool nan = simd_any(isnan(score)) || isnan(maximum[g]);
       const float next = nan ? NAN : max(maximum[g], simd_max(score));
-      const float old_weight = maximum[g] == -INFINITY ? 0.0f : precise::exp(maximum[g] - next);
+      const bool same = TF_METAL_SOFTMAX_IDENTITY_GUARD && next == maximum[g] && isfinite(maximum[g]);
+      const float old_weight = maximum[g] == -INFINITY ? 0.0f : (same ? 1.0f : precise::exp(maximum[g] - next));
       p[g] = live ? precise::exp(score - next) : 0.0f;
-      total[g] = fma(total[g], old_weight, simd_sum(p[g]));
-      out[g] *= old_weight;
+      total[g] = (same && isfinite(total[g] + simd_sum(p[g]))) ? total[g] + simd_sum(p[g]) : fma(total[g], old_weight, simd_sum(p[g]));
+      if (!same || !all(isfinite(out[g]))) out[g] *= old_weight;
       maximum[g] = next;
     }
     // a masked key's value is selected away, never multiplied, so whatever it holds never enters the sums
@@ -129,9 +129,10 @@ inline float glm_max(float x, float y) {
   for (uint c = 0; c < chunks; ++c) {
     const device float* p = first + c * step;
     if (p[TF_D] == -INFINITY) continue;
-    const float w = precise::exp(p[TF_D] - maximum);
-    total = fma(p[TF_D + 1], w, total);
-    out = fma(((const device glm_vec*)p)[lane], glm_vec(w), out);
+    const bool same = TF_METAL_SOFTMAX_IDENTITY_GUARD && p[TF_D] == maximum && isfinite(p[TF_D]);
+    const float w = same ? 1.0f : precise::exp(p[TF_D] - maximum);
+    total = (same && isfinite(p[TF_D + 1] + total)) ? p[TF_D + 1] + total : fma(p[TF_D + 1], w, total);
+    out = (same && all(isfinite(((const device glm_vec*)p)[lane] + out))) ? ((const device glm_vec*)p)[lane] + out : fma(((const device glm_vec*)p)[lane], glm_vec(w), out);
   }
   const size_t qi = ((size_t)row * TF_QH + head) * TF_D;
   ((device glm_bvec*)(O + qi))[lane] = glm_bvec(total == 0.0f ? glm_vec(0.0f) : out / total);

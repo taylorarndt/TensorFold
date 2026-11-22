@@ -1,23 +1,19 @@
+#ifndef TF_METAL_SOFTMAX_IDENTITY_GUARD
+#define TF_METAL_SOFTMAX_IDENTITY_GUARD 1
+#endif
 // GLM's sparse MLA, prompt chunks, tensor units: exact bf16 products, fp32 sums, probabilities as 3 bf16 parts (exact).
 #include <metal_stdlib>
 using namespace metal;
 #include "../nax.h"
 using namespace tfp;
 
-#ifndef GLM_HEADS // TP2 builds one Mac's 32 heads
 #define GLM_HEADS 64
-#endif
 constant constexpr int HEADS = GLM_HEADS, RANK = 512, GROUP = 16, BLOCK = 32, SLICE = RANK / 4;
 constant constexpr float NO_SCORE = -3.4028234663852886e38f;
 
 // A transposed right operand's element e: the row it comes from (here a key) and its column (a latent dim).
-#ifndef TF_SIMD_FRAGS
 inline short t_key(short e, short2 home) { return home.y + (e >> 2) * 8; }
 inline short t_dim(short e, short2 home) { return home.x + (e & 3); }
-#else
-inline short t_key(short e, short2 home) { return home.x + TF_COL(e); }
-inline short t_dim(short e, short2 home) { return home.y + (e >> 2) * 8; }
-#endif
 // A plain operand's or an accumulator's element e: its row (a head, or a key for the values) and column.
 inline short p_row(short e, short2 home) { return home.y + (e >> 2) * 8; }
 inline short p_col(short e, short2 home) { return home.x + TF_COL(e); }
@@ -51,7 +47,6 @@ inline void sparse_pass(thread frag<float> (&acc)[4][2], thread float (&m)[2], t
     threadgroup_barrier(mem_flags::mem_threadgroup);
     // scores: this simdgroup's dims
     frag<float> lo_s = frag<float>(0), hi_s = frag<float>(0);
-#ifndef TF_SIMD_FRAGS
     // a lane's four dims of each of its four keys, 8 bytes a load
     const device bfloat* kr[4];
     TF_UNROLL
@@ -62,20 +57,6 @@ inline void sparse_pass(thread frag<float> (&acc)[4][2], thread float (&m)[2], t
       const frag<bfloat> b1 = frag<bfloat>(*(const device bfloat4*)(kr[2] + 16 * t), *(const device bfloat4*)(kr[3] + 16 * t));
       mma_16x32<false, true>(lo_s, hi_s, q[t], b0, b1);
     }
-#else
-    TF_UNROLL
-    for (short t = 0; t < 8; t++) {
-      frag<bfloat> b0, b1;
-      TF_UNROLL
-      for (short e = 0; e < 8; e++) {
-        const int k0 = keyrow[t_key(e, home)], k1 = keyrow[16 + t_key(e, home)];
-        const int d = d0 + 16 * t + t_dim(e, home);
-        b0[e] = keys[long(max(k0, 0)) * RANK + d];
-        b1[e] = keys[long(max(k1, 0)) * RANK + d];
-      }
-      mma_16x32<false, true>(lo_s, hi_s, q[t], b0, b1);
-    }
-#endif
     TF_UNROLL
     for (short e = 0; e < 8; e++) {
       partial[s][lane][e] = lo_s[e];
@@ -98,7 +79,7 @@ inline void sparse_pass(thread frag<float> (&acc)[4][2], thread float (&m)[2], t
       TF_UNROLL
       for (short i = 0; i < 4; i++) bmax = max(bmax, max(sc[4 * h + i], sc[8 + 4 * h + i]));
       const float new_max = max(m[h], row_max(bmax));
-      factor[h] = fast::exp(m[h] - new_max);
+      factor[h] = TF_METAL_SOFTMAX_IDENTITY_GUARD && new_max == m[h] && isfinite(m[h]) ? 1.0f : fast::exp(m[h] - new_max);
       m[h] = new_max;
     }
     frag<bfloat> p1[2], p2[2], p3[2]; // keys 0-15 and 16-31: the probabilities' three bf16 parts
@@ -116,7 +97,7 @@ inline void sparse_pass(thread frag<float> (&acc)[4][2], thread float (&m)[2], t
       p3[kb][e] = bfloat(r1 - float(b));
     }
     TF_UNROLL
-    for (short h = 0; h < 2; h++) l[h] = l[h] * factor[h] + row_sum(bsum[h]);
+    for (short h = 0; h < 2; h++) l[h] = (factor[h] == 1.0f ? l[h] : l[h] * factor[h]) + row_sum(bsum[h]);
     if (!simd_all(factor[0] == 1.0f && factor[1] == 1.0f)) // a factor of 1 leaves every value as it is
     TF_UNROLL
     for (short c = 0; c < 4; c++) {
@@ -129,25 +110,13 @@ inline void sparse_pass(thread frag<float> (&acc)[4][2], thread float (&m)[2], t
     // values: keys 0-15 then 16-31, each part in turn, into this simdgroup's 128 dims
     TF_UNROLL
     for (short kb = 0; kb < 2; kb++) {
-#ifndef TF_SIMD_FRAGS
       const device bfloat* va = keys + long(max(keyrow[16 * kb + home.y], 0)) * RANK + d0 + home.x;
       const device bfloat* vb = keys + long(max(keyrow[16 * kb + home.y + 8], 0)) * RANK + d0 + home.x;
-#endif
       TF_UNROLL
       for (short c = 0; c < 4; c++) {
         frag<bfloat> v0, v1;
-#ifndef TF_SIMD_FRAGS
         v0 = frag<bfloat>(*(const device bfloat4*)(va + 32 * c), *(const device bfloat4*)(vb + 32 * c));
         v1 = frag<bfloat>(*(const device bfloat4*)(va + 32 * c + 16), *(const device bfloat4*)(vb + 32 * c + 16));
-#else
-        TF_UNROLL
-        for (short e = 0; e < 8; e++) {
-          const int k = max(keyrow[16 * kb + p_row(e, home)], 0);
-          const int d = d0 + 32 * c + p_col(e, home);
-          v0[e] = keys[long(k) * RANK + d];
-          v1[e] = keys[long(k) * RANK + d + 16];
-        }
-#endif
         mma_16x32<false, false>(acc[c][0], acc[c][1], p1[kb], v0, v1);
         mma_16x32<false, false>(acc[c][0], acc[c][1], p2[kb], v0, v1);
         mma_16x32<false, false>(acc[c][0], acc[c][1], p3[kb], v0, v1);
@@ -245,9 +214,10 @@ inline void sparse_clear(thread frag<float> (&acc)[4][2], thread float (&m)[2], 
   float4 o = float4(0.0f);
   for (int b = 0; b < blocks; b++) {
     const long at = first + long(b) * HEADS;
-    const float f = fast::exp(pm[at] - most);
-    total += pl[at] * f;
-    o += *(const device float4*)(po + at * RANK + 4 * t) * f;
+    const bool same = TF_METAL_SOFTMAX_IDENTITY_GUARD && pm[at] == most && isfinite(pm[at]);
+    const float f = same ? 1.0f : fast::exp(pm[at] - most);
+    total += (same && isfinite(pl[at])) ? pl[at] : pl[at] * f;
+    o += (same && all(isfinite(*(const device float4*)(po + at * RANK + 4 * t)))) ? *(const device float4*)(po + at * RANK + 4 * t) : *(const device float4*)(po + at * RANK + 4 * t) * f;
   }
   const float4 v = total == 0.0f ? float4(0.0f) : o / total;
   *(device bfloat4*)(out + (long(row) * HEADS + head) * RANK + 4 * t) = bfloat4(v);

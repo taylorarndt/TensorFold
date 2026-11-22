@@ -1,3 +1,6 @@
+#ifndef TF_METAL_SOFTMAX_IDENTITY_GUARD
+#define TF_METAL_SOFTMAX_IDENTITY_GUARD 1
+#endif
 // DeepSeek V4.1 CSA2 attention over one shared latent row (key and value), as a decode launch or a prompt launch.
 
 // Key order, whatever the launch: the window by absolute position ascending, then selected rows in index order.
@@ -9,9 +12,7 @@
 using namespace metal;
 #pragma clang fp contract(off)
 
-#ifndef TF_CTL
 #define TF_CTL 0
-#endif
 
 #define TF_ATTN_D 512u
 #define TF_ATTN_WIN 128u
@@ -243,14 +244,15 @@ inline void tf_attn_window(thread TfAcc& s, thread const TfQ& q, const device ui
 template <uint HS>
 inline void tf_attn_join(thread TfAccN<HS>& t, uint hh, float mc, float lc, thread const float* ac) {
   const float nm = mc > t.m[hh] ? mc : t.m[hh];
-  const float a = precise::exp(t.m[hh] - nm);
-  const float b = precise::exp(mc - nm);
-  const float l1 = t.l[hh] * a;
-  const float l2 = lc * b;
+  const bool same = TF_METAL_SOFTMAX_IDENTITY_GUARD && nm == t.m[hh] && isfinite(t.m[hh]), incoming = TF_METAL_SOFTMAX_IDENTITY_GUARD && nm == mc && isfinite(mc);
+  const float a = same ? 1.0f : precise::exp(t.m[hh] - nm);
+  const float b = incoming ? 1.0f : precise::exp(mc - nm);
+  const float l1 = (same && isfinite(t.l[hh])) ? t.l[hh] : t.l[hh] * a;
+  const float l2 = (incoming && isfinite(lc)) ? lc : lc * b;
   t.l[hh] = l1 + l2;
   for (uint i = 0; i < 16; ++i) {
-    const float x1 = t.acc[hh][i] * a;
-    const float x2 = ac[i] * b;
+    const float x1 = (same && isfinite(t.acc[hh][i])) ? t.acc[hh][i] : t.acc[hh][i] * a;
+    const float x2 = (incoming && isfinite(ac[i])) ? ac[i] : ac[i] * b;
     t.acc[hh][i] = x1 + x2;
   }
   t.m[hh] = nm;
@@ -261,11 +263,12 @@ template <typename T, uint HS>
 inline void tf_attn_store(thread TfAccN<HS>& s, uint hh, float sink, const device float* cs, device T* out, uint lane) {
   const float m = s.m[hh];
   const float top = sink > m ? sink : m;
-  const float af = precise::exp(m - top);
+  const bool same = TF_METAL_SOFTMAX_IDENTITY_GUARD && top == m && isfinite(m);
+  const float af = same ? 1.0f : precise::exp(m - top);
   const float e = precise::exp(sink - top);
-  const float den = fma(s.l[hh], af, e);
+  const float den = (same && isfinite(s.l[hh] + e)) ? s.l[hh] + e : fma(s.l[hh], af, e);
   float x[16];
-  for (uint i = 0; i < 16; ++i) x[i] = (s.acc[hh][i] * af) / den;
+  for (uint i = 0; i < 16; ++i) x[i] = ((same && isfinite(s.acc[hh][i])) ? s.acc[hh][i] : s.acc[hh][i] * af) / den;
   if (lane >= 28) {
     for (uint i = 0; i < 16; i += 2) {
       const uint pr = 8 * (lane - 28) + i / 2;
@@ -382,7 +385,7 @@ inline void tf_attn_pkey(thread TfAccN<TF_ATTN_PH>& s, thread const float (*q)[1
   for (uint hh = 1; hh < TF_ATTN_PH; ++hh) mm = mine == hh ? s.m[hh] : mm;
   const bool rise = w > mm;
   if (simd_any(rise)) {
-    const float a = precise::exp(mm - w);
+    const float a = TF_METAL_SOFTMAX_IDENTITY_GUARD && w == mm && isfinite(mm) ? 1.0f : precise::exp(mm - w);
     for (uint hh = 0; hh < TF_ATTN_PH; ++hh)
       if (simd_broadcast(rise ? 1u : 0u, hh) != 0) {
         const float ah = simd_broadcast(a, hh);

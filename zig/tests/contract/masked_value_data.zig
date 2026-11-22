@@ -23,6 +23,8 @@ pub const Geometry = struct {
     selected_prefix: ?usize = null,
     selected_shift_first: usize = 0,
     sink: bool = false,
+    scale: ?f32 = null,
+    identity_all_masked: bool = true,
 };
 
 pub const Data = struct {
@@ -30,6 +32,7 @@ pub const Data = struct {
     rows: usize,
     poisoned: bool,
     poison: Poison,
+    identity: bool = false,
     q: []u16,
     k: []u16,
     v: []u16,
@@ -52,6 +55,39 @@ pub const Data = struct {
         const slot = if (g.ring == 0) key else key % g.ring;
         return if (g.cache == .token) (slot * g.kv + head) * g.dim + col else (head * g.cap + slot) * g.dim + col;
     }
+    pub fn queryAt(d: Data, row: usize, head: usize, col: usize) usize {
+        const g = d.geo;
+        return if (g.query == .token) (row * g.heads + head) * g.dim + col else (head * d.rows + row) * g.dim + col;
+    }
+
+    pub fn scale(d: Data) f64 {
+        return d.geo.scale orelse 1 / @sqrt(@as(f64, @floatFromInt(d.geo.dim)));
+    }
+
+    /// `.inf` ties finite maxima; `.nan` changes max after 32 keys then ties; both use signed-zero/subnormal V.
+    pub fn plantIdentity(d: *Data) void {
+        d.identity = true;
+        const g = d.geo;
+        for (0..g.cap) |key| for (0..g.kv) |head| {
+            const zero: u16 = if (key % 2 == 0) 0 else 0x8000;
+            d.v[d.cacheAt(key, head, 0)] = zero;
+            d.v[d.cacheAt(key, head, 7)] = if ((key + head) % 2 == 0) 0x0001 else 0x8001;
+            if (d.poison == .inf) {
+                d.k[d.cacheAt(key, head, 0)] = zero;
+                if (g.latent) d.v[d.cacheAt(key, head, 0)] = zero;
+            } else {
+                const target: f32 = if (key < 32) -1 else 1;
+                const score_bits = c.toBf16(target / d.scale());
+                d.k[d.cacheAt(key, head, 0)] = score_bits;
+                if (g.latent) d.v[d.cacheAt(key, head, 0)] = score_bits;
+            }
+        };
+        if (d.poison == .nan) {
+            for (0..d.rows) |row| for (0..g.heads) |head| {
+                d.q[d.queryAt(row, head, 0)] = c.toBf16(1);
+            };
+        } else if (d.q.len > 0) d.q[0] = 0x8000;
+    }
 
     pub fn outputAt(d: Data, row: usize, head: usize, col: usize) usize {
         const g = d.geo;
@@ -62,8 +98,41 @@ pub const Data = struct {
         return d.rows * d.geo.heads * d.geo.dim;
     }
 
-    /// Binary64 softmax at the actual zero scores, excluding unseen keys before either K or V is read.
+    /// Binary64 softmax at real zero scores over the visible masked-value set, excluding unseen keys before K/V reads.
+    fn referenceIdentity(d: Data, want: []f64, mag: []f64) void {
+        const g = d.geo;
+        @memset(want, 0);
+        for (0..d.rows) |r| {
+            const hi = g.first + r + 1;
+            const skip = if (r == 0) @max(if (g.skip_zero_first) @as(usize, 1) else 0, g.selected_shift_first) else 0;
+            const lo = @max(if (g.window > 0) hi -| g.window else 0, skip);
+            for (0..g.heads) |h| {
+                var total: f64 = if (g.sink) 1 else 0;
+                const kh = h / (g.heads / g.kv);
+                for (lo..hi) |key| {
+                    if (g.identity_all_masked and r == 0) continue;
+                    if (g.selected_prefix) |prefix| if (key >= prefix + (if (r == 0) g.selected_shift_first else 0) and key < (hi - 1) / 8 * 8) continue;
+                    // plantIdentity leaves every other Q/K component zero.
+                    const q = c.fromBf16(d.q[d.queryAt(r, h, 0)]);
+                    const k = c.fromBf16(d.k[d.cacheAt(key, kh, 0)]);
+                    const probability = @exp(q * k * d.scale());
+                    total += probability;
+                    for (0..g.dim) |col| {
+                        const i = d.outputAt(r, h, col);
+                        want[i] += probability * c.fromBf16(d.v[d.cacheAt(key, kh, col)]);
+                    }
+                }
+                for (0..g.dim) |col| {
+                    const i = d.outputAt(r, h, col);
+                    const x = if (total == 0) 0 else want[i] / total;
+                    want[i] = if (g.gated) c.fromBf16(c.toBf16(@floatCast(x))) * 0.5 else x;
+                    mag[i] = @abs(want[i]);
+                }
+            }
+        }
+    }
     pub fn reference(d: Data, want: []f64, mag: []f64) void {
+        if (d.identity) return d.referenceIdentity(want, mag);
         const g = d.geo;
         for (0..d.rows) |r| {
             const hi = g.first + r + 1;
@@ -172,4 +241,29 @@ test "masked value: a zero-score sink adds to the denominator but has no value" 
     d.reference(want, mag);
     try std.testing.expectEqual(@as(f64, 17.0 / 18.0), want[0]);
     try std.testing.expectEqual(c.Class.pos_inf, c.classOf(want[d.outputAt(1, 0, 7)]));
+}
+
+test "masked value: identity plants ties, changed maxima, signed zero and subnormals" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const geo: Geometry = .{ .heads = 1, .kv = 1, .dim = 8, .cap = 64, .first = 16 };
+    const tied = try Data.init(a, geo, 8, false, .inf);
+    var planted = tied;
+    planted.plantIdentity();
+    try std.testing.expectEqual(@as(u16, 0), planted.k[planted.cacheAt(0, 0, 0)]);
+    try std.testing.expectEqual(@as(u16, 0x8000), planted.k[planted.cacheAt(1, 0, 0)]);
+    try std.testing.expectEqual(@as(u16, 0x8000), planted.v[planted.cacheAt(1, 0, 0)]);
+    try std.testing.expectEqual(@as(u16, 0x0001), planted.v[planted.cacheAt(0, 0, 7)]);
+    try std.testing.expectEqual(@as(u16, 0x8001), planted.v[planted.cacheAt(1, 0, 7)]);
+    const changed = try Data.init(a, geo, 8, false, .nan);
+    var maximum = changed;
+    maximum.plantIdentity();
+    try std.testing.expect(c.fromBf16(maximum.k[maximum.cacheAt(31, 0, 0)]) < 0);
+    try std.testing.expect(c.fromBf16(maximum.k[maximum.cacheAt(32, 0, 0)]) > 0);
+    try std.testing.expectEqual(@as(f32, 1), c.fromBf16(maximum.q[maximum.queryAt(0, 0, 0)]));
+    const want = try a.alloc(f64, maximum.count());
+    const mag = try a.alloc(f64, want.len);
+    maximum.reference(want, mag);
+    for (0..geo.dim) |col| try std.testing.expectEqual(@as(f64, 0), want[maximum.outputAt(0, 0, col)]);
 }

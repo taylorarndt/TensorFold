@@ -1,3 +1,6 @@
+#ifndef TF_METAL_SOFTMAX_IDENTITY_GUARD
+#define TF_METAL_SOFTMAX_IDENTITY_GUARD 1
+#endif
 // Gemma 4's decode glue around the core lane projections: gilby's RowDecode kernels (#360) and MLX's ops it calls.
 #include <metal_stdlib>
 using namespace metal;
@@ -19,17 +22,6 @@ inline uint2 gemma_codes(const device uchar* weight, size_t id, uint b) {
 #if EB == 4
   const uchar v = weight[id * (D / 2) + b];
   return uint2(v & 0xf, v >> 4);
-#else
-  const device uchar* row = weight + id * (D * EB / 8);
-  uint2 out;
-  for (uint j = 0; j < 2; j++) {
-    const uint bit = (2 * b + j) * EB, at = bit / 8, sh = bit % 8;
-    uint v = uint(row[at]) >> sh;
-    if (sh + EB > 8) v |= uint(row[at + 1]) << (8 - sh);
-    out[j] = v & ((1u << EB) - 1u);
-  }
-  return out;
-#endif
 }
 
 // Embedding rows of the EB-bit table times the bf16 embedding scale: MLX's dequantize, then a bf16 multiply.
@@ -225,9 +217,9 @@ kernel void gemma_attention_partial(const device bfloat* Q [[buffer(0)]], const 
       if (live[j]) bm = metal::max(bm, sc[j]);
     }
     const float mn = metal::max(m, bm);
-    const float a = metal::exp(m - mn);
-    l *= a;
-    for (int i = 0; i < DPL; i++) o[i] *= a;
+    const bool same = TF_METAL_SOFTMAX_IDENTITY_GUARD && mn == m && isfinite(m);
+    const float a = same ? 1.0f : metal::exp(m - mn);
+    if (!same || !isfinite(l)) l *= a; for (int i = 0; i < DPL; i++) if (!same || !isfinite(o[i])) o[i] *= a;
     for (int j = 0; j < BLK; j++) {
       if (!live[j]) continue;
       const float b = metal::exp(sc[j] - mn);
@@ -260,9 +252,10 @@ kernel void gemma_attention_partial(const device bfloat* Q [[buffer(0)]], const 
   float lsum = 0.0f, acc[DPL];
   for (int i = 0; i < DPL; i++) acc[i] = 0.0f;
   for (int t = 0; t < S; t++) {
-    const float e = sl[g * S + t] > 0.0f ? metal::exp(sm[g * S + t] - top) : 0.0f;
-    lsum = fma(sl[g * S + t], e, lsum);
-    for (int i = 0; i < DPL; i++) acc[i] = fma(so[g * S + t][lane * DPL + i], e, acc[i]);
+    const bool same = sl[g * S + t] > 0.0f && TF_METAL_SOFTMAX_IDENTITY_GUARD && sm[g * S + t] == top && isfinite(sm[g * S + t]);
+    const float e = sl[g * S + t] > 0.0f ? (same ? 1.0f : metal::exp(sm[g * S + t] - top)) : 0.0f;
+    lsum = (same && isfinite(sl[g * S + t] + lsum)) ? sl[g * S + t] + lsum : fma(sl[g * S + t], e, lsum);
+    for (int i = 0; i < DPL; i++) acc[i] = (same && isfinite(so[g * S + t][lane * DPL + i] + acc[i])) ? so[g * S + t][lane * DPL + i] + acc[i] : fma(so[g * S + t][lane * DPL + i], e, acc[i]);
   }
   if (FUSE.y) { // FUSE.y (one chunk): gemma_attention_merge's output and sums, exp(top - top) being 1, to OUT and XS
     for (int i = 0; i < DPL; i++) OUT[(size_t(r) * NQ + qh) * DH + lane * DPL + i] = bfloat(acc[i] / lsum);
@@ -289,9 +282,10 @@ kernel void gemma_attention_merge(const device float* PM [[buffer(0)]], const de
   float lsum = 0.0f, acc[DPL];
   for (int i = 0; i < DPL; i++) acc[i] = 0.0f;
   for (int c = 0; c < NCH; c++) {
-    const float e = PL[base + c] > 0.0f ? metal::exp(PM[base + c] - top) : 0.0f;
-    lsum = fma(PL[base + c], e, lsum);
-    for (int i = 0; i < DPL; i++) acc[i] = fma(PO[(base + c) * DH + lane * DPL + i], e, acc[i]);
+    const bool same = PL[base + c] > 0.0f && TF_METAL_SOFTMAX_IDENTITY_GUARD && PM[base + c] == top && isfinite(PM[base + c]);
+    const float e = PL[base + c] > 0.0f ? (same ? 1.0f : metal::exp(PM[base + c] - top)) : 0.0f;
+    lsum = (same && isfinite(PL[base + c] + lsum)) ? PL[base + c] + lsum : fma(PL[base + c], e, lsum);
+    for (int i = 0; i < DPL; i++) acc[i] = (same && isfinite(PO[(base + c) * DH + lane * DPL + i] + acc[i])) ? PO[(base + c) * DH + lane * DPL + i] + acc[i] : fma(PO[(base + c) * DH + lane * DPL + i], e, acc[i]);
   }
   for (int i = 0; i < DPL; i++) OUT[(size_t(r) * NQ + qh) * DH + lane * DPL + i] = bfloat(acc[i] / lsum);
   if (xst == 0) return;

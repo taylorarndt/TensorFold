@@ -1,3 +1,6 @@
+#ifndef TF_METAL_SOFTMAX_IDENTITY_GUARD
+#define TF_METAL_SOFTMAX_IDENTITY_GUARD 1
+#endif
 // Prompt rows' attention before the M5: attention_prompt.metal's 512-key chunks and merge in simdgroup matrices.
 typedef simdgroup_matrix<float, 8, 8> q27_sgf;
 typedef simdgroup_matrix<bfloat, 8, 8> q27_sgb;
@@ -100,8 +103,9 @@ inline void q27_sg_step(thread Q27SgRun& r, int kt, int kend, const device bfloa
   x0 = max(x0, simd_shuffle_xor(x0, 1)); x0 = max(x0, simd_shuffle_xor(x0, 8));
   x1 = max(x1, simd_shuffle_xor(x1, 1)); x1 = max(x1, simd_shuffle_xor(x1, 8));
   const float nm0 = max(r.m0, x0), nm1 = max(r.m1, x1);
-  const float f0 = (x0 == -INFINITY) ? 1.0f : fast::exp2(r.m0 - nm0);
-  const float f1 = (x1 == -INFINITY) ? 1.0f : fast::exp2(r.m1 - nm1);
+  const bool same0 = TF_METAL_SOFTMAX_IDENTITY_GUARD && nm0 == r.m0 && isfinite(r.m0), same1 = TF_METAL_SOFTMAX_IDENTITY_GUARD && nm1 == r.m1 && isfinite(r.m1);
+  const float f0 = (x0 == -INFINITY || same0) ? 1.0f : fast::exp2(r.m0 - nm0);
+  const float f1 = (x1 == -INFINITY || same1) ? 1.0f : fast::exp2(r.m1 - nm1);
   q27_sgf P[2][4];
   float y0 = 0.0f, y1 = 0.0f;
   _Pragma("clang loop unroll(full)")
@@ -115,11 +119,11 @@ inline void q27_sg_step(thread Q27SgRun& r, int kt, int kend, const device bfloa
   }
   y0 += simd_shuffle_xor(y0, 1); y0 += simd_shuffle_xor(y0, 8);
   y1 += simd_shuffle_xor(y1, 1); y1 += simd_shuffle_xor(y1, 8);
-  if (x0 != -INFINITY) { r.l0 = r.l0 * f0 + y0; r.m0 = nm0; }
-  if (x1 != -INFINITY) { r.l1 = r.l1 * f1 + y1; r.m1 = nm1; }
+  if (x0 != -INFINITY) { r.l0 = ((same0 && isfinite(r.l0)) ? r.l0 : r.l0 * f0) + y0; r.m0 = nm0; }
+  if (x1 != -INFINITY) { r.l1 = ((same1 && isfinite(r.l1)) ? r.l1 : r.l1 * f1) + y1; r.m1 = nm1; }
   _Pragma("clang loop unroll(full)")
   for (int e = 0; e < 16; e++)
-    for (int i = 0; i < 2; i++) { r.O[0][e].thread_elements()[i] *= f0; r.O[1][e].thread_elements()[i] *= f1; }
+    for (int i = 0; i < 2; i++) { if (!same0 || !isfinite(r.O[0][e].thread_elements()[i])) r.O[0][e].thread_elements()[i] *= f0; if (!same1 || !isfinite(r.O[1][e].thread_elements()[i])) r.O[1][e].thread_elements()[i] *= f1; }
   for (int j = 0; j < 4; j++) {
     _Pragma("clang loop unroll(full)")
     for (int e = 0; e < 16; e++) {

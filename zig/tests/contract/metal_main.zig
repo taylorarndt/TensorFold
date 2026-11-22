@@ -31,9 +31,8 @@ const gemma_embed = @import("metal_gemma4_embed.zig");
 const gemma_mixed = @import("metal_gemma4_mixed.zig");
 const llama_k = @import("metal_llama_all.zig");
 const g = contract.gates;
-const usage = "usage: tf-kernel-contract [--only TEXT] [--no-gates] [--no-limits] [--offline DIR] [--seed N] [--repro] [--rotary-long] [--rotary-accuracy FILE]";
-const Opts = struct { only: ?[]const u8 = null, gates: bool = true, limits: bool = true, offline: ?[]const u8 = null, seed: u64 = 0x6b63, repro: bool = false, rotary_long: bool = false, rotary_accuracy: ?[]const u8 = null };
-
+const usage = "usage: tf-kernel-contract [--only TEXT] [--dump DIR] [--no-gates] [--no-limits] [--offline DIR] [--seed N] [--repro] [--rotary-long] [--rotary-accuracy FILE]";
+const Opts = struct { only: ?[]const u8 = null, dump: ?[]const u8 = null, gates: bool = true, limits: bool = true, offline: ?[]const u8 = null, seed: u64 = 0x6b63, repro: bool = false, rotary_long: bool = false, rotary_accuracy: ?[]const u8 = null };
 fn parse(args: []const [:0]const u8) !Opts {
     var o = Opts{};
     var i: usize = 1;
@@ -42,12 +41,12 @@ fn parse(args: []const [:0]const u8) !Opts {
         if (std.mem.eql(u8, a, "--rotary-long")) o.rotary_long = true else if (std.mem.eql(u8, a, "--repro")) o.repro = true else if (std.mem.eql(u8, a, "--no-gates")) o.gates = false else if (std.mem.eql(u8, a, "--no-limits")) o.limits = false else if (i + 1 < args.len and std.mem.eql(u8, a, "--only")) {
             i += 1;
             o.only = args[i];
-        } else if (i + 1 < args.len and std.mem.eql(u8, a, "--offline")) {
-            i += 1;
-            o.offline = args[i];
         } else if (i + 1 < args.len and std.mem.eql(u8, a, "--seed")) {
             i += 1;
             o.seed = try std.fmt.parseInt(u64, args[i], 0);
+        } else if (i + 1 < args.len and (std.mem.eql(u8, a, "--offline") or std.mem.eql(u8, a, "--dump"))) {
+            i += 1;
+            if (std.mem.eql(u8, a, "--dump")) o.dump = args[i] else o.offline = args[i];
         } else if (i + 1 < args.len and std.mem.eql(u8, a, "--rotary-accuracy")) {
             i += 1;
             o.rotary_accuracy = args[i];
@@ -58,7 +57,6 @@ fn parse(args: []const [:0]const u8) !Opts {
     }
     return o;
 }
-
 const Reg = affine_k.Reg;
 const common = [_]Reg{
     .{ .v = .{ .kind = .row, .bits = 4, .group = 64 }, .name = "metal row projection q4 g64" },
@@ -79,7 +77,6 @@ const common = [_]Reg{
 
 /// The lane kernel takes every format on the M5's tensor units, and 6-bit groups of 32 alone before them.
 const m5_only = @import("metal_lane_variants.zig").m5;
-
 /// Ornith-1.5-122B's routed block: the experts' decode rows with an extra matrix, then moe.metal's kernels.
 const Moe = struct {
     extra: std.ArrayList(*q27_moe.Extra) = .empty,
@@ -552,6 +549,8 @@ pub fn main(init: std.process.Init) !u8 {
     defer native_qsa_select.destroy();
     const native_qsa_scores = try @import("metal_qwen4_qsa_scores.zig").Suite.create(a, device, queue, &kernels, o.only);
     defer native_qsa_scores.destroy();
+    const identity_suites = try @import("metal_identity_suites.zig").Suite.create(a, device, queue, &kernels, o.only);
+    defer identity_suites.destroy();
     const native_qsa_attn = try @import("metal_qwen4_qsa_attn.zig").Suite.create(a, device, queue, &kernels, o.only);
     defer native_qsa_attn.destroy();
     const native_qsa_norm = try @import("metal_qwen4_qsa_norm.zig").Suite.create(a, device, queue, &kernels, o.only);
@@ -576,6 +575,7 @@ pub fn main(init: std.process.Init) !u8 {
     defer glm_prompt.destroy();
     const idol_dino = try @import("metal_idol_dino.zig").Suite.create(a, device, queue, &kernels, o.only);
     defer idol_dino.destroy();
+    try @import("metal_identity_dump.zig").run(init, a, kernels.items, o.dump, o.gates);
     var t: g.Tally = .{};
     const t0 = std.Io.Clock.awake.now(init.io);
     if (o.gates) {

@@ -63,9 +63,8 @@ pub fn prepare(p: anytype) !void {
             const keys = g.first + d.rows;
             const mask = try a.alloc(u8, d.rows * keys);
             for (0..d.rows) |r| for (0..keys) |j| {
-                mask[r * keys + j] = @intFromBool(j <= g.first + r);
+                mask[r * keys + j] = @intFromBool(j <= g.first + r and !(d.identity and g.identity_all_masked and r == 0));
             };
-            p.aux[0] = try p.rig.input(mask);
             if (p.kind == .shared_split) p.aux[1] = try p.rig.scratch(d.rows * g.heads * (g.dim + 2) * 4);
         },
         .qwen35_pages => {
@@ -79,6 +78,10 @@ pub fn prepare(p: anytype) !void {
             @memset(vals, ct.spec.toBf16(1));
             const pos = g.first + 1;
             if (d.poisoned) vals[page_words + pos * g.dim + 7] = if (d.poison == .inf) 0x7f80 else 0x7fc0;
+            if (d.identity) for (0..g.kv) |head| for (0..g.first + d.rows + 1) |key| for (0..g.dim) |col| {
+                keys[head * page_words + key * g.dim + col] = d.k[d.cacheAt(key, head, col)];
+                vals[head * page_words + key * g.dim + col] = d.v[d.cacheAt(key, head, col)];
+            };
             p.k = try p.rig.input(std.mem.sliceAsBytes(keys));
             p.v = try p.rig.input(std.mem.sliceAsBytes(vals));
             p.aux[4] = try p.rig.input(std.mem.asBytes(&@as([1]u32, .{1})));
