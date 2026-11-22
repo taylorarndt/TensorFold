@@ -216,9 +216,9 @@ pub const LaneHost = struct {
         h.mutex.lockUncancelable(h.io);
         defer h.unlock();
         const unavailable = h.closing or (if (h.health) |source| !source.read(source.ctx) else false);
-        if (unavailable or h.stale or pressure.refuses(h)) {
+        if (admit.queueFull(h.queued.items.len) or unavailable or h.stale or pressure.refuses(h)) {
             h.gpa.destroy(job);
-            return if (unavailable) error.Closed else if (h.stale) error.Stale else error.MemoryPressure;
+            return if (admit.queueFull(h.queued.items.len)) error.Busy else if (unavailable) error.Closed else if (h.stale) error.Stale else error.MemoryPressure;
         }
         // foreground before background, each in arrival order (the Python job queue's priority)
         var at = h.queued.items.len;

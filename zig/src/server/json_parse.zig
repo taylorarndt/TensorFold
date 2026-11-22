@@ -11,6 +11,13 @@ pub const Result = union(enum) {
 
 const max_depth = 900; // nesting past this answers as Python's RecursionError does
 
+fn strictEnabled() bool {
+    const raw = std.c.getenv("TENSORFOLD_HTTP_STRICT_INPUT_LIMITS") orelse return false;
+    return std.mem.eql(u8, std.mem.span(raw), "1");
+}
+
+const strict_string_bytes = 1 << 20;
+
 const Failure = error{ Syntax, OutOfMemory };
 
 /// Decode ``bytes`` as UTF-8 (a BOM dropped, surrogates passed) and parse one JSON document.
@@ -18,7 +25,7 @@ pub fn parse(a: Allocator, bytes: []const u8) Allocator.Error!Result {
     var text = bytes;
     if (std.mem.startsWith(u8, text, "\xef\xbb\xbf")) text = text[3..];
     if (try utf8Error(a, text, if (text.ptr == bytes.ptr) 0 else 3)) |message| return .{ .err = message };
-    var p: Parser = .{ .a = a, .s = text };
+    var p: Parser = .{ .a = a, .s = text, .strict = strictEnabled() };
     const start = p.skip(0);
     const value = p.value(start, 0) catch |e| switch (e) {
         error.OutOfMemory => return error.OutOfMemory,
@@ -73,6 +80,7 @@ const Parser = struct {
     s: []const u8,
     pos: usize = 0,
     message: []const u8 = "",
+    strict: bool = false,
 
     fn skip(p: *const Parser, at: usize) usize {
         var i = at;
@@ -108,11 +116,11 @@ const Parser = struct {
         switch (p.s[at]) {
             '"' => return .{ .string = try p.string(at + 1) },
             '{' => {
-                if (depth >= max_depth) return p.recursion("object");
+                if (depth >= (if (p.strict) @as(usize, 64) else max_depth)) return p.recursion("object");
                 return p.object(at + 1, depth + 1);
             },
             '[' => {
-                if (depth >= max_depth) return p.recursion("array");
+                if (depth >= (if (p.strict) @as(usize, 64) else max_depth)) return p.recursion("array");
                 return p.array(at + 1, depth + 1);
             },
             'n' => return p.word(at, "null", .null),
@@ -180,6 +188,11 @@ const Parser = struct {
         return if (std.mem.eql(u8, text, "-0")) "0" else text;
     }
 
+    fn stringRoom(p: *Parser, current: usize, extra: usize, at: usize) Failure!void {
+        if (p.strict and (current > strict_string_bytes or extra > strict_string_bytes - current))
+            return p.syntax("strict JSON string exceeds 1048576 bytes", at);
+    }
+
     fn string(p: *Parser, begin: usize) Failure![]const u8 {
         const s = p.s;
         var out: std.ArrayList(u8) = .empty;
@@ -190,6 +203,7 @@ const Parser = struct {
             if (i >= s.len) return p.syntax("Unterminated string starting at", begin - 1);
             if (s[i] < 0x20) return p.syntax("Invalid control character at", i);
             if (s[i] == '"') {
+                try p.stringRoom(out.items.len, i - chunk_start, i);
                 if (out.items.len == 0) {
                     p.pos = i + 1;
                     return s[chunk_start..i]; // no escapes: the input slice itself
@@ -198,6 +212,7 @@ const Parser = struct {
                 p.pos = i + 1;
                 return out.items;
             }
+            try p.stringRoom(out.items.len, i - chunk_start, i);
             try out.appendSlice(p.a, s[chunk_start..i]);
             i += 1; // the backslash
             if (i >= s.len) return p.syntax("Unterminated string starting at", begin - 1);
@@ -214,6 +229,7 @@ const Parser = struct {
                     't' => '\t',
                     else => return p.syntax("Invalid \\escape", i - 1),
                 };
+                try p.stringRoom(out.items.len, 1, i);
                 try out.append(p.a, mapped);
                 i += 1;
                 continue;
@@ -232,6 +248,7 @@ const Parser = struct {
             }
             var buf: [4]u8 = undefined;
             const n = wtf8Encode(code, &buf);
+            try p.stringRoom(out.items.len, n, i);
             try out.appendSlice(p.a, buf[0..n]);
         }
     }
@@ -244,6 +261,7 @@ const Parser = struct {
             return .{ .object = o };
         }
         while (true) {
+            if (p.strict and o.count() >= 4096) return p.syntax("strict JSON object has too many entries", i);
             if (i >= p.s.len or p.s[i] != '"') return p.syntax("Expecting property name enclosed in double quotes", i);
             const key = try p.string(i + 1);
             i = p.skip(p.pos);
@@ -271,6 +289,7 @@ const Parser = struct {
             return .{ .array = &.{} };
         }
         while (true) {
+            if (p.strict and list.items.len >= 32768) return p.syntax("strict JSON array has too many entries", i);
             try list.append(p.a, try p.value(i, depth));
             i = p.skip(p.pos);
             if (i < p.s.len and p.s[i] == ']') {

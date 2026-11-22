@@ -25,6 +25,7 @@ pub const Switch = enum {
     TF_GLM_PROMPT_STEPS,
     TF_GLM_SHARED,
     TENSORFOLD_PROMPT_CACHE_KEEP_OTHERS,
+    TENSORFOLD_HTTP_STRICT_INPUT_LIMITS,
     TENSORFOLD_KOLIBRI_KV_PAGES,
     TENSORFOLD_DORY_KV_PAGES,
     GEMMA_DRAFT_BF16,
@@ -144,6 +145,7 @@ pub const cuda_cache: []const []const u8 = &.{ "nemotron_h", "nemotron_h_omni", 
 
 pub const entries = [_]Entry{
     .{ .id = .TF_CACHE_EVICT, .families = cuda_cache, .backend = "multiple", .scopes = &.{ .{ .backend = "cuda", .families = cuda_cache }, .{ .backend = "metal", .families = &.{ "nemotron_h", "qwen3_5", "qwen3_5_moe", "qwen4_exp", "glm5_next", "glm_moe_dsa", "minimax_m3_vl", "gemma4", "gemma4_unified", "spark2_5", "llama", "lfm2_moe", "lfm3", "lfm3_vl", "step5_vl", "kimi_k3", "kimi_k31" } }, .{ .backend = "xpu", .families = &.{ "nemotron_h", "lfm3", "qwen3_5", "gemma4" } } }, .class = .experimental, .syntax = .present, .report_values = &.{"decayed_resume"}, .effect = "Opt into bounded resume credit for RAM snapshot eviction", .evidence = "#3241; synthetic host rows gate; default main unchanged" },
+    .{ .id = .TENSORFOLD_HTTP_STRICT_INPUT_LIMITS, .families = &.{}, .backend = "native-server", .class = .experimental, .syntax = .one, .effect = "Opt into pre-resource HTTP input limits", .evidence = "host regression; default off" },
     .{ .id = .TF_QWEN_REQUEST_STARTS, .families = qwen, .class = .arithmetic, .syntax = .one, .effect = "Opt into CUDA message-start prompt cuts", .evidence = "#1334; default-off; GB10 six-turn: resumed equals fresh, one reply differs from unset" },
     .{ .id = .TF_GLM_REQUEST_STARTS, .families = &.{"glm5_next"}, .class = .arithmetic, .syntax = .one, .effect = "Opt into CUDA message-start prompt cuts", .evidence = "#2396; default-off; GB10 TP=2 receipts in #2404" },
     .{ .id = .TF_QWEN_KV_PAGES, .families = qwen, .class = .identical, .effect = "KV pool page size; memory and workload tradeoffs", .evidence = "#1357" },

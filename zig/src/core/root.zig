@@ -76,6 +76,7 @@ pub const checkpoint_weights = @import("checkpoint_weights.zig");
 pub const kv_pool = @import("kv_pool.zig");
 pub const kv_prompts = @import("kv_prompts.zig");
 pub const state_walk = @import("state_walk.zig");
+pub const resource_limits = @import("resource_limits.zig");
 
 test {
     _ = torch_pth;
