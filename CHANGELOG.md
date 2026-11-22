@@ -4,6 +4,8 @@ Each release's page on GitHub has its notes and measurements. See [the 1.0.0 rel
 
 ## Unreleased
 
+- Metal Qwen3.8-27B with DFlash2: `TF_Q27_DFLASH_TAP_LEAN=1` copies prompt taps into the drafter ring with one wait a chunk instead of one per 128 rows and skips tap work for prompt chunks the ring will not keep; outputs are unchanged and the switch is off by default (#N).
+
 - CUDA on unified-memory Linux (GB10): the start-up budget counts the checkpoint's own cached pages as room, so a checkpoint that was just read is not refused for them, without dropping them from the page cache before the load (#4427, refs #3192, #1857).
 
 - Server: chat and completions take `n` from 1 through 16, each choice its own engine request on the one prompt with its own `index` and `tensorfold.seed` (choice 0 keeps the request's seed, so `n: 1` replies are unchanged) and `usage` counting the prompt once; a request with `n` above 1 takes `n` places under `--max-inflight` and `--max-inflight-per-key`, all or none, and gets 400 with `logprobs` or a required tool call, while `/v1/responses` and `/v1/imprint` still refuse `n` other than 1 (#3148, closes #3114).
