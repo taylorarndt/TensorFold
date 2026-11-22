@@ -291,7 +291,6 @@ pub const rules = [_]Rule{
     .{ .name = "TF_GLM_INDEX_CUDA", .scope = .glm, .kind = .word, .words = &.{ "1", "0", "scores" }, .forms = "1 (both kernels), 0 (neither) or scores (scores only; unset or blank is both)" },
     .{ .name = "TF_GLM_KV_HOST_GIB", .scope = .glm, .kind = .real, .forms = "a finite GiB amount of at least 0 (unset or blank uses one full window and 16 rows a page)" },
 } ++ @import("environment_deepseek.zig").rules(Rule);
-
 /// An alias the server refuses at `version` (semantic versions; a pre-release is before its release), else null.
 pub fn retired(name: []const u8, version: []const u8) ?Rule {
     for (rules) |r| if (std.mem.eql(u8, name, r.name)) {
@@ -306,14 +305,12 @@ pub fn rule(name: []const u8) Rule {
     for (rules) |r| if (std.mem.eql(u8, name, r.name)) return r;
     @panic("unregistered strict environment parser");
 }
-
 /// A compile error unless `name` has a row, so a strict read can never reach `rule`'s panic at run time.
 pub fn registered(comptime name: []const u8) void {
     @setEvalBranchQuota(20 * rules.len * 64);
     for (rules) |r| if (std.mem.eql(u8, r.name, name)) return;
     @compileError(name ++ " has no row in platform/environment.zig");
 }
-
 /// Null means unset, or blank when the row preserves a legacy blank default, never malformed.
 pub fn parse(name: []const u8, raw: ?[]const u8) Error!?u64 {
     const r = rule(name);
