@@ -62,7 +62,7 @@ pub const Layout = struct {
         if (g[1] == 0 or g[0] >= l.k / l.format.group or g[1] > l.k / l.format.group - g[0]) return error.InvalidGroupCut;
         if (l.groups != null and l.output != .f32) return error.PartialOutputNeedsFloat;
         // Conservative declared storage, including the single-SK unused reduction array.
-        if (l.threadgroupBytes() > 32768) return error.ThreadgroupMemoryLimit;
+        if (l.threadgroupBytes() > 32768 or (l.inline_sums and !l.inlineSumsFit())) return error.ThreadgroupMemoryLimit;
         var end: usize = 0;
         for (l.ranges) |r| {
             if (r[1] == 0 or r[0] < end or r[0] >= l.tileCount() or r[1] > l.tileCount() - r[0]) return error.InvalidTileRange;
@@ -89,6 +89,14 @@ pub const Layout = struct {
 
     pub fn threadgroupBytes(l: Layout) usize {
         return l.sk * 32 * l.format.group + @max(l.sk -| 1, 1) * 16 * 32 * @sizeOf(f32);
+    }
+
+    pub fn inlineSumsFit(l: Layout) bool {
+        if (!l.reg or l.sk == 0) return false;
+        const groups_per_split = (l.groupCut()[1] + l.sk - 1) / l.sk;
+        const sums = l.sk * groups_per_split * 16 * @sizeOf(f32);
+        const partials = @max(l.sk -| 1, 1) * 16 * 32 * @sizeOf(f32);
+        return sums + partials <= 32768;
     }
 
     pub fn weightWords(l: Layout) usize {
