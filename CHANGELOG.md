@@ -4,6 +4,8 @@ Each release's page on GitHub has its notes and measurements. See [the 1.0.0 rel
 
 ## Unreleased
 
+- GLM TP=2 decode on CUDA: `TF_GLM_HC_SHARED_FN=1` loads each hyper-connection `fn` element once per block and dots it with several rows, keeping each row's FMA and reduction order; off by default (#N).
+
 - GLM TP=2 prefill on CUDA: `TF_GLM_INDEX_SPLIT=32768` keeps indexer scores, pools and token rows local on each rank below that position (no blocking all-gathers) and own partials are read in place; outputs are unchanged and the default stays 2048 (#4510).
 
 - GLM at TP=2 on CUDA prefill: dense attention runs only on the rows sparse attention leaves untouched when a chunk crosses the dense limit, and prefill skips projections nothing reads (MTP proposal and query-side work); outputs are unchanged (#4499).
