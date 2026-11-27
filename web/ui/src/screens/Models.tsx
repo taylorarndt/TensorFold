@@ -26,6 +26,7 @@ export default function Models({ machine, engine, settings, refreshEngine, refre
   const [models, setModels] = useState<Model[] | null>(null)
   const [sel, setSel] = useState<string | null>(null)
   const [filter, setFilter] = useState('all')
+  const searchRef = useRef<HTMLInputElement>(null)
   const [search, setSearch] = useState('')
   const [pulls, setPulls] = useState<Record<string, PullStatus>>({})
   const [notice, setNotice] = useState<string | null>(null)
@@ -106,7 +107,8 @@ export default function Models({ machine, engine, settings, refreshEngine, refre
   const progressText = (fraction: number) => fraction >= 1 ? 'Finishing download' : `${Math.floor(fraction * 100)}% downloaded`
   const reason = (m: Model) => !m.runs_here ? m.runs_note || 'Unsupported on this engine' : m.verdict?.level === 'no' ? m.verdict.reason : null
   const closeDetails = () => {
-    document.getElementById(`pick-${sel}`)?.focus()
+    const target = document.getElementById(`pick-${sel}`) ?? searchRef.current
+    target?.focus()
     setSel(null)
     if (!discover) showSub('models', null)
   }
@@ -146,7 +148,7 @@ export default function Models({ machine, engine, settings, refreshEngine, refre
   const shown = models?.filter((m) => (discover || m.installed) && FILTERS.find((f) => f.id === filter)!.test(m) && `${m.name} ${m.id}`.toLowerCase().includes(search.toLowerCase())) ?? []
   return (
     <section>
-      <div className="model-search"><input className="input" type="search" aria-label="Search models" placeholder="Search models" value={search} onChange={(e) => setSearch(e.target.value)} /><select className="sel" value={filter} onChange={(e) => setFilter(e.target.value)} aria-label="Filter models">{FILTERS.map((f) => <option key={f.id} value={f.id}>{f.label}</option>)}</select><a className="btn" href="#bench">Benchmarks</a>{discover && <button className="btn" aria-busy={is('refresh')} onClick={refresh}>{is('refresh') ? 'Refreshing…' : 'Refresh sizes'}</button>}</div>
+      <div className="model-search"><input ref={searchRef} className="input" type="search" aria-label="Search models" placeholder="Search models" value={search} onChange={(e) => setSearch(e.target.value)} /><select className="sel" value={filter} onChange={(e) => setFilter(e.target.value)} aria-label="Filter models">{FILTERS.map((f) => <option key={f.id} value={f.id}>{f.label}</option>)}</select><a className="btn" href="#bench">Benchmarks</a>{discover && <button className="btn" aria-busy={is('refresh')} onClick={refresh}>{is('refresh') ? 'Refreshing…' : 'Refresh sizes'}</button>}</div>
       {notice && <div className="notice" role="alert">{notice}</div>}
       {conflict && <div className="notice conflict" role="alertdialog" aria-label="Another model is running">
         <span>Stop <b>{engine?.model}</b> and start <b>{conflict.name}</b>{engine?.connections ? `, disconnecting ${engine.connections} active connections` : ''}?</span>

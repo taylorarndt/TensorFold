@@ -1,13 +1,14 @@
 import { useEffect, useRef, type ReactNode } from 'react'
 
-export default function Drawer({ title, close, children }: { title: string; close: () => void; children: ReactNode }) {
+export default function Drawer({ title, close, children }: { title: string; close: (opener: HTMLElement | null) => void; children: ReactNode }) {
   const panel = useRef<HTMLDivElement>(null)
+  const opener = useRef<HTMLElement | null>(null)
   useEffect(() => {
-    const before = document.activeElement as HTMLElement | null
+    if (document.activeElement !== panel.current) opener.current = document.activeElement as HTMLElement | null
     panel.current?.focus()
     const keys = (e: KeyboardEvent) => {
       if (!panel.current?.contains(document.activeElement)) return
-      if (e.key === 'Escape') { e.preventDefault(); close() }
+      if (e.key === 'Escape') { e.preventDefault(); close(opener.current) }
       if (e.key !== 'Tab') return
       const nodes = panel.current?.querySelectorAll<HTMLElement>('button:not([disabled]),a[href],input,select,textarea,[tabindex="0"]')
       if (!nodes?.length) return
@@ -16,9 +17,9 @@ export default function Drawer({ title, close, children }: { title: string; clos
       else if (!e.shiftKey && document.activeElement === last) { e.preventDefault(); first.focus() }
     }
     addEventListener('keydown', keys)
-    return () => { removeEventListener('keydown', keys); before?.focus() }
+    return () => removeEventListener('keydown', keys)
   }, [close])
-  return <div className="drawer-veil" onMouseDown={(e) => { if (e.target === e.currentTarget) close() }}><div className="drawer" role="dialog" aria-modal="true" aria-label={title} ref={panel} tabIndex={-1}>
-    <div className="drawer-title"><h1>{title}</h1><button className="btn quiet" aria-label="Close compute and clusters" onClick={close}>✕</button></div>{children}
+  return <div className="drawer-veil" onMouseDown={(e) => { if (e.target === e.currentTarget) close(opener.current) }}><div className="drawer" role="dialog" aria-modal="true" aria-label={title} ref={panel} tabIndex={-1}>
+    <div className="drawer-title"><h1>{title}</h1><button className="btn quiet" aria-label="Close compute and clusters" onClick={() => close(opener.current)}>✕</button></div>{children}
   </div></div>
 }

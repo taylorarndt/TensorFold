@@ -46,6 +46,11 @@ test('actual workspace components render the desktop hierarchy and retained feat
     for (const screen of ['Monitor', 'Bench']) {
       const Screen = (await server.ssrLoadModule(`/src/screens/${screen}.tsx`)).default
       const markup = renderToStaticMarkup(React.createElement(Screen, { ...ctx, decodeHistory: [] }))
+      if (screen === 'Monitor') {
+        assert.match(markup, /role="img" aria-label="Writing speed collected on this page\. No readings\."/)
+        const localChart = renderToStaticMarkup(React.createElement(Screen, { ...ctx, decodeHistory: [2.5, 9, 4] }))
+        assert.match(localChart, /role="img" aria-label="Writing speed collected on this page\. Range 2\.5 to 9\.0 tokens per second\. Last reading 4\.0\."/)
+      }
       assert.ok(markup.includes('<a class="back-link" href="#models"><span aria-hidden="true">← </span>Models</a>'), screen)
     }
     const Markdown = (await server.ssrLoadModule('/src/Markdown.tsx')).default

@@ -23,7 +23,11 @@ const typing = (t: EventTarget | null) => t instanceof HTMLElement && (t.tagName
 export default function App() {
   const [route, setRoute] = useState<Route>(readRoute)
   const fleetBack = useRef(['models', 'teach', 'connect'].includes(route) ? location.hash : '#models')
-  const closeFleet = useCallback(() => { location.hash = fleetBack.current }, [])
+  const returnFocus = useRef<HTMLElement | null>(null)
+  const closeFleet = useCallback((opener: HTMLElement | null) => {
+    returnFocus.current = opener
+    location.hash = fleetBack.current
+  }, [])
   const [machine, setMachine] = useState<Machine | null>(null)
   const [engine, setEngine] = useState<EngineInfo | null>(null)
   const [settings, setSettings] = useState<Settings | null>(null)
@@ -57,8 +61,11 @@ export default function App() {
     document.title = `${TITLES[route]} · TensorFold Web`
     const previous = previousRoute.current
     previousRoute.current = route
-    if (previous === route || route === 'fleet' || (previous === 'fleet' && document.activeElement !== document.body)) return
-    mainRef.current?.focus({ preventScroll: true })
+    if (previous === route || route === 'fleet') return
+    const opener = returnFocus.current
+    returnFocus.current = null
+    if (opener?.isConnected && opener !== document.body) opener.focus()
+    else mainRef.current?.focus({ preventScroll: true })
   }, [route])
   // a refused token is not "the server is not answering": the banner below says what to do
   const explain = useCallback((what: string) => (e: unknown) => { if (!(e instanceof ApiError && e.status === 401)) setError(`${what}: ${e}`) }, [])

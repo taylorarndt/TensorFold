@@ -7,6 +7,9 @@ import MonitorUsage from './MonitorUsage'
 
 const WINDOWS = [{ s: 1800, label: '30 min' }, { s: 3600, label: '1 h' }, { s: 8 * 3600, label: '8 h' }]
 
+function speedSummary(readings: number[]) {
+  return readings.length ? `Range ${Math.min(...readings).toFixed(1)} to ${Math.max(...readings).toFixed(1)} tokens per second. Last reading ${readings[readings.length - 1].toFixed(1)}.` : 'No readings.'
+}
 
 function HistoryChart({ h, window }: { h: History; window: number }) {
   const W = 400, H = 64
@@ -26,9 +29,8 @@ function HistoryChart({ h, window }: { h: History; window: number }) {
   }
   if (cur.length) runs.push(cur)
   const readings = pts.flatMap(([, v]) => v == null ? [] : [v])
-  const summary = readings.length ? `Range ${Math.min(...readings).toFixed(1)} to ${Math.max(...readings).toFixed(1)} tokens per second. Last reading ${readings[readings.length - 1].toFixed(1)}.` : 'No readings.'
   return (
-    <svg viewBox={`0 0 ${W} ${H}`} preserveAspectRatio="none" role="img" aria-label={`Writing speed over the last ${window / 60} minutes. ${summary}`}>
+    <svg viewBox={`0 0 ${W} ${H}`} preserveAspectRatio="none" role="img" aria-label={`Writing speed over the last ${window / 60} minutes. ${speedSummary(readings)}`}>
       {runs.map((r, i) => {
         const line = r.map(([t, v]) => `${x(t).toFixed(1)},${y(v).toFixed(1)}`).join(' L')
         return <g key={i}>
@@ -42,12 +44,13 @@ function HistoryChart({ h, window }: { h: History; window: number }) {
 }
 
 function Spark({ values }: { values: number[] }) {
-  if (values.length < 2) return <svg viewBox="0 0 400 64" preserveAspectRatio="none" aria-hidden="true" />
+  const label = `Writing speed collected on this page. ${speedSummary(values)}`
+  if (values.length < 2) return <svg viewBox="0 0 400 64" preserveAspectRatio="none" role="img" aria-label={label} />
   const max = Math.max(1, ...values)
   const pts = values.map((v, i) => [(i / (values.length - 1)) * 400, 60 - (v / max) * 52] as const)
   const line = pts.map(([x, y]) => `${x.toFixed(1)},${y.toFixed(1)}`).join(' L')
   return (
-    <svg viewBox="0 0 400 64" preserveAspectRatio="none" aria-hidden="true">
+    <svg viewBox="0 0 400 64" preserveAspectRatio="none" role="img" aria-label={label}>
       <path d={`M0,64 L${line} L400,64 Z`} fill="var(--accent-soft)" />
       <path d={`M${line}`} fill="none" stroke="var(--accent)" strokeWidth="2" vectorEffect="non-scaling-stroke" />
     </svg>
